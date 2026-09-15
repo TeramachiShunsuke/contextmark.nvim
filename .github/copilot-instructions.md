@@ -41,11 +41,14 @@ extmark の位置を sidecar へ書き戻す必要がある**。呼び忘れる�
 
 空白1つ・改行1つの違いでも契約違反になる。整形の「改善」提案はしない。
 
-## 4. sidecar はリポジトリ外に置く
+## 4. 既定の保存先はリポジトリ外
 
-保存先は `stdpath("state")/contextmark/<name>-<root の SHA-256 先頭16桁>.json`。
-**Note を追加しても Git diff が出ないこと**が設計要件。保存先をリポジトリ配下へ移す変更や、
-リポジトリ内へ一時ファイルを書く変更は指摘してほしい。
+既定の保存先は `stdpath("state")/contextmark/<name>-<root の SHA-256 先頭16桁>.json`。
+**既定設定のままなら Note を追加しても Git diff が出ないこと**が設計要件。
+
+ユーザーが `storage.dir` を明示指定してリポジトリ配下へ置くのは正当な設定であり、
+これ自体は指摘しなくてよい。指摘すべきなのは、既定値そのものをリポジトリ配下へ変える、
+`storage.dir` の有無にかかわらずリポジトリ内へ書き込む、といった変更。
 
 書き込みは temp ファイル + `os.rename` の atomic replace。これを直接書き込みに変える変更も指摘する。
 
@@ -54,9 +57,13 @@ extmark の位置を sidecar へ書き戻す必要がある**。呼び忘れる�
 
 ## 5. delivery は agent を知らない
 
-core の責務は prompt 文字列を作って router に渡すまで。特定の agent 名や CLI を
-`delivery.lua` 以下の core へ持ち込む変更は設計違反。agent 固有の処理は
-`lua/contextmark/adapters/<name>.lua` に閉じる。
+core の責務は prompt 文字列を作って router に渡すまで。agent 固有の**処理**は
+`lua/contextmark/adapters/<name>.lua` に閉じ、`delivery.lua` へ持ち込まない。
+
+`delivery.lua` の `resolve_direct()` が `adapter = "auto"` の候補として adapter 名
+（現状 `"sidekick"`）を列挙しているのは既存の設計どおりで、これ自体は指摘しない。
+指摘すべきなのは、agent の API 呼び出し・引数整形・可用性判定といった実処理が
+`delivery.lua` 側へ漏れる変更。
 
 adapter の契約:
 
@@ -79,8 +86,23 @@ adapter へは prompt を原文のまま渡す（context template を通すと N
 
 ## 7. モジュール構成
 
-新しいモジュールは `init.lua` から呼ぶ。モジュール間の相互 require を増やさない
-（現状の例外は `render` → `anchor` / `store` のみ）。
+core モジュールの `require` は一方向の DAG になっている。
+
+```
+init  → anchor, config, delivery, prompt, render, selection, store, ui, util
+render → anchor, config, store, util
+prompt → anchor, util
+ui     → config, util
+store  → config
+delivery → config
+anchor / selection / util → 依存なし
+```
+
+**循環 require を作らないこと**が不変条件。上位（`init` / `render`）が下位を呼ぶのは正常で、
+下位が上位を呼び返す変更を指摘する。
+
+adapter は `delivery.lua` が実行時に `require("contextmark.adapters." .. name)` で解決するため、
+`lua/contextmark/adapters/` への追加は `init.lua` を変更せずに行ってよい。
 
 ## 指摘しなくてよいこと
 
