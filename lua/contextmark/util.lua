@@ -2,7 +2,13 @@
 local M = {}
 
 local function normalize(path)
-  return vim.fs.normalize(vim.fn.fnamemodify(path, ":p")):gsub("/$", "")
+  local expanded = vim.fs.normalize(vim.fn.fnamemodify(path, ":p"))
+  -- Resolve symlinks so that the same file reached through different paths
+  -- (/tmp/x vs /private/tmp/x on macOS) maps to one project root and sidecar.
+  -- fs_realpath returns nil for paths that do not exist yet; keep the literal
+  -- path in that case.
+  local resolved = vim.uv.fs_realpath(expanded) or expanded
+  return (vim.fs.normalize(resolved):gsub("/$", ""))
 end
 
 function M.project_root(path)
@@ -44,8 +50,36 @@ function M.read_buffer_or_file(path)
   return ok and lines or nil
 end
 
+local glob_patterns = {}
+
+-- "*" matches every filetype, "markdown*" matches markdown and markdown.mdx.
+local function glob_to_pattern(glob)
+  local pattern = glob_patterns[glob]
+  if not pattern then
+    pattern = "^" .. glob:gsub("[%^%$%(%)%%%.%[%]%+%-%?]", "%%%0"):gsub("%*", ".*") .. "$"
+    glob_patterns[glob] = pattern
+  end
+  return pattern
+end
+
 function M.is_filetype_allowed(filetype, allowed)
-  return vim.tbl_contains(allowed, filetype)
+  if type(allowed) == "function" then
+    return allowed(filetype) and true or false
+  end
+  if type(allowed) == "string" then
+    allowed = { allowed }
+  end
+  for _, entry in ipairs(allowed or {}) do
+    if entry == filetype then
+      return true
+    end
+    if type(entry) == "string" and entry:find("*", 1, true) then
+      if filetype:match(glob_to_pattern(entry)) then
+        return true
+      end
+    end
+  end
+  return false
 end
 
 function M.range_label(start_line, end_line)

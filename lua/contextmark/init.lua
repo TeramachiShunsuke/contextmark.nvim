@@ -272,12 +272,16 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, "ContextMarkStaleRange", { link = "DiagnosticWarn", default = true })
 
   local group = vim.api.nvim_create_augroup("contextmark", { clear = true })
+  -- Matched here rather than through the autocmd pattern so that globs and
+  -- predicate functions in `filetypes` behave identically across every event.
   vim.api.nvim_create_autocmd("FileType", {
     group = group,
-    pattern = config.get().filetypes,
+    pattern = "*",
     callback = function(event)
-      map_buffer(event.buf)
-      render.render(event.buf)
+      if util.is_filetype_allowed(vim.bo[event.buf].filetype, config.get().filetypes) then
+        map_buffer(event.buf)
+        render.render(event.buf)
+      end
     end,
   })
   vim.api.nvim_create_autocmd({ "BufReadPost", "BufEnter" }, {

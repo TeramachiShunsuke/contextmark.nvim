@@ -370,6 +370,51 @@ test("integrates storage, extmarks, commands, and prompt scope", function()
   assert(text:find('User comment: "integration note"', 1, true))
 end)
 
+test("matches filetypes by name, glob, and predicate", function()
+  local util = require("contextmark.util")
+  local defaults = { "markdown", "markdown.mdx" }
+  equal(util.is_filetype_allowed("markdown", defaults), true)
+  equal(util.is_filetype_allowed("markdown.mdx", defaults), true)
+  equal(util.is_filetype_allowed("lua", defaults), false)
+
+  -- The dot in "markdown.mdx" must be escaped, so "markdown*" may not match
+  -- an unrelated filetype that merely shares the prefix characters.
+  equal(util.is_filetype_allowed("markdown.mdx", { "markdown*" }), true)
+  equal(util.is_filetype_allowed("markdownfoo", { "markdown.*" }), false)
+  equal(util.is_filetype_allowed("typescriptreact", { "*script*" }), true)
+
+  equal(util.is_filetype_allowed("anything", { "*" }), true)
+  equal(util.is_filetype_allowed("", { "*" }), true)
+  equal(util.is_filetype_allowed("lua", "*"), true)
+
+  equal(
+    util.is_filetype_allowed("python", function(filetype)
+      return filetype ~= "markdown"
+    end),
+    true
+  )
+  equal(
+    util.is_filetype_allowed("markdown", function(filetype)
+      return filetype ~= "markdown"
+    end),
+    false
+  )
+end)
+
+test("resolves a symlinked project root to one location", function()
+  local util = require("contextmark.util")
+  local base = vim.fn.tempname()
+  vim.fn.mkdir(base .. "/real/.git", "p")
+  assert(vim.uv.fs_symlink(base .. "/real", base .. "/link", { dir = true }))
+
+  local through_link = util.project_root(base .. "/link/note.md")
+  local through_real = util.project_root(base .. "/real/note.md")
+  equal(through_link, through_real)
+  equal(util.relative_path(base .. "/link/note.md", through_link), "note.md")
+
+  vim.fn.delete(base, "rf")
+end)
+
 local failures = 0
 for _, item in ipairs(tests) do
   local ok, error_message = pcall(item.callback)

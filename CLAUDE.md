@@ -4,8 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 概要
 
-Markdown の選択範囲に、本文を変更せず Note を付ける Neovim プラグイン。Note はリポジトリ外の
+選択範囲に、本文を変更せず Note を付ける Neovim プラグイン。Note はリポジトリ外の
 sidecar JSON に保存し、Orca 互換の prompt として AI agent へ送る。Neovim 0.11+ / Lua。
+
+既定の対象は Markdown だが、Markdown 固有の処理はどこにも入っていない。対象は
+`config.filetypes` だけで決まり、完全一致 / glob / 述語関数を受け付ける
+（`util.is_filetype_allowed()`）。filetype 判定を追加する場合はこの関数を通すこと。
+autocmd 側で `pattern` による絞り込みをしてはいけない（glob と関数で挙動が分かれるため、
+`FileType` autocmd も `pattern = "*"` + `is_filetype_allowed()` で揃えてある）。
 
 ## コマンド
 
@@ -81,6 +87,10 @@ Linewise Visual (`V`) と blockwise (`<C-v>`) は `kind = "line"` に落とし�
 
 `stdpath("state")/contextmark/<プロジェクト名>-<root の SHA-256 先頭16桁>.json`。
 プロジェクトルートは `vim.fs.root(path, { ".git" })`。
+
+`util.lua` の `normalize()` は `vim.uv.fs_realpath()` でシンボリックリンクを解決する。
+これがないと `/tmp/x` と `/private/tmp/x` が別プロジェクト扱いになり、sidecar が分裂する。
+存在しないパスでは `fs_realpath` が nil を返すので、その場合は展開後のパスをそのまま使う。
 
 リポジトリ内にファイルを作らないのが設計上の要件（Note 追加で Git diff を出さない）。
 保存先をリポジトリ配下へ移す変更は、この前提を崩すので慎重に。

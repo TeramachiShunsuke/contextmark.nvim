@@ -1,12 +1,15 @@
 # contextmark.nvim
 
-Markdown の選択範囲に、本文を変更せず Note を付ける Neovim プラグインです。
+選択範囲に、本文を変更せず Note を付ける Neovim プラグインです。
 Note はリポジトリ外の sidecar JSON に保存し、Orca と同じ形の prompt として
 まとめて、または一部だけ取り出せます。
 
+既定の対象は Markdown ですが、Markdown 固有の処理は入っていないため、
+`filetypes` を変えれば任意の filetype で同じように使えます。
+
 ## できること
 
-- Markdown の現在行、Visual文字範囲、Visual行範囲に Note を追加
+- 現在行、Visual文字範囲、Visual行範囲に Note を追加
 - sign、範囲ハイライト、行末 virtual text で Note を表示
 - 同じ行の複数 Note は1つの件数マーカーにまとめ、カーソル停止時に全文を hover 表示
 - 編集中は extmark で追従し、再読込時は本文と前後文脈から再アンカー
@@ -51,7 +54,7 @@ return {
 | `]m` / `[m` | 次 / 前の Note |
 | `<leader>ml` | プロジェクトの Note を Quickfix に表示 |
 | `<leader>mpc` | カーソル位置の1件を prompt 化 |
-| `<leader>mpb` | 現在の Markdown の全件を prompt 化 |
+| `<leader>mpb` | 現在のバッファの全件を prompt 化 |
 | `<leader>mpa` | プロジェクトの全件を prompt 化 |
 | `<leader>mps` | チェック UI で一部を選んで prompt 化 |
 
@@ -123,6 +126,40 @@ Orca の出力に合わせています。複数ファイルでは `File` と `So
 通常のVisual mode (`v`) では選択文字列だけが `Excerpt` になります。Linewise
 Visual (`V`) はVim本来の行選択なので、選択した行全体が `Excerpt` になります。
 
+## 対象 filetype
+
+`filetypes` は次の3つの書き方を受け付けます。
+
+```lua
+-- 完全一致
+filetypes = { "markdown", "markdown.mdx", "lua", "python" }
+
+-- glob（"*" が任意の文字列にマッチ）
+filetypes = { "markdown*", "*script*" }
+
+-- すべての filetype
+filetypes = { "*" }
+
+-- 述語関数
+filetypes = function(filetype)
+  return filetype ~= "" and filetype ~= "help"
+end
+```
+
+lazy.nvim の `ft` で遅延ロードしている場合、`ft` に含まれない filetype では
+プラグイン自体が読み込まれません。Markdown 以外でも使うなら `ft` も合わせて広げるか、
+`ft` を外して `event = "VeryLazy"` などにしてください。
+
+```lua
+return {
+  "TeramachiShunsuke/contextmark.nvim",
+  event = "VeryLazy",
+  opts = { filetypes = { "*" } },
+}
+```
+
+`Source:` 行には filetype がそのまま入ります（Markdown 系のみ `markdown` に正規化）。
+
 ## 設定
 
 ```lua
@@ -176,6 +213,9 @@ Noteに含まれる `{selection}` などがテンプレート展開されるこ�
 
 保存先はプロジェクトルートの絶対パスを SHA-256 で識別した JSON です。
 リポジトリ内へファイルを追加しないため、Note の追加で Git diff は発生しません。
+
+パスはシンボリックリンクを解決してから識別します。macOS の `/tmp` のように
+実体が別の場所にある経路で開いても、同じファイルは常に同じ sidecar を指します。
 
 アンカーは次の順で復元します。
 
