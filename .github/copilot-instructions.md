@@ -1,5 +1,12 @@
 # Copilot review instructions
 
+## 出力言語
+
+レビューコメント、要約、提案されたコード変更の説明は**すべて日本語で書くこと**。
+コード識別子・ファイルパス・エラーメッセージの引用は原文のままでよい。
+
+## 対象
+
 contextmark.nvim は Markdown の選択範囲に Note を付ける Neovim プラグイン（Lua / Neovim 0.11+）。
 Note はリポジトリ外の sidecar JSON に保存し、Orca 互換の prompt として AI agent へ送る。
 
