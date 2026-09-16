@@ -370,6 +370,61 @@ test("integrates storage, extmarks, commands, and prompt scope", function()
   assert(text:find('User comment: "integration note"', 1, true))
 end)
 
+test("setup initializes already-open allowed buffers", function()
+  local config = require("contextmark.config")
+  local plugin = require("contextmark")
+  local render = require("contextmark.render")
+  local store = require("contextmark.store")
+  local util = require("contextmark.util")
+  local state_dir = vim.fn.tempname()
+
+  store.reset_cache()
+  vim.cmd.edit("examples/feedback.md")
+  local bufnr = vim.api.nvim_get_current_buf()
+  local path = vim.api.nvim_buf_get_name(bufnr)
+  local root = util.project_root(path)
+  local relative = util.relative_path(path, root)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local now = util.now()
+
+  config.setup({
+    storage = { dir = state_dir },
+    filetypes = { "*" },
+    keymaps = { add = "gmc" },
+  })
+  local ok = store.add(root, {
+    id = "cm-setup-existing-buffer",
+    file = relative,
+    filetype = vim.bo[bufnr].filetype,
+    body = "existing buffer note",
+    created_at = now,
+    updated_at = now,
+    anchor = anchor.capture(lines, 1, 1, 1),
+  })
+  equal(ok, true)
+
+  vim.api.nvim_buf_clear_namespace(bufnr, render.namespace(), 0, -1)
+  plugin.setup({
+    storage = { dir = state_dir },
+    filetypes = { "*" },
+    keymaps = { add = "gmc" },
+  })
+
+  local keymaps = vim.api.nvim_buf_get_keymap(bufnr, "n")
+  local found = false
+  for _, mapping in ipairs(keymaps) do
+    if mapping.lhs == "gmc" then
+      found = true
+      break
+    end
+  end
+  equal(found, true)
+
+  local marks = vim.api.nvim_buf_get_extmarks(bufnr, render.namespace(), 0, -1, {})
+  equal(#marks > 0, true)
+  vim.cmd.enew({ bang = true })
+end)
+
 test("matches filetypes by name, glob, and predicate", function()
   local util = require("contextmark.util")
   local defaults = { "markdown", "markdown.mdx" }

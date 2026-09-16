@@ -10,6 +10,14 @@ local util = require("contextmark.util")
 
 local M = {}
 local configured = false
+local map_buffer
+
+local function initialize_buffer(bufnr)
+  if util.is_filetype_allowed(vim.bo[bufnr].filetype, config.get().filetypes) then
+    map_buffer(bufnr)
+    render.render(bufnr)
+  end
+end
 
 local function current_context()
   local bufnr = vim.api.nvim_get_current_buf()
@@ -227,7 +235,7 @@ function M.goto_comment(direction)
   end
 end
 
-local function map_buffer(bufnr)
+map_buffer = function(bufnr)
   local keys = config.get().keymaps
   local function map(modes, lhs, callback, description)
     if type(lhs) == "string" and lhs ~= "" then
@@ -278,10 +286,7 @@ function M.setup(opts)
     group = group,
     pattern = "*",
     callback = function(event)
-      if util.is_filetype_allowed(vim.bo[event.buf].filetype, config.get().filetypes) then
-        map_buffer(event.buf)
-        render.render(event.buf)
-      end
+      initialize_buffer(event.buf)
     end,
   })
   vim.api.nvim_create_autocmd({ "BufReadPost", "BufEnter" }, {
@@ -316,6 +321,11 @@ function M.setup(opts)
     group = group,
     callback = ui.close_hover,
   })
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_is_loaded(bufnr) then
+      initialize_buffer(bufnr)
+    end
+  end
   configured = true
 end
 
