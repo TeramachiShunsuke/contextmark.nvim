@@ -7,7 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 選択範囲に、本文を変更せず Note を付ける Neovim プラグイン。Note はリポジトリ外の
 sidecar JSON に保存し、Orca 互換の prompt として AI agent へ送る。Neovim 0.11+ / Lua。
 
-既定の対象は Markdown だが、Markdown 固有の処理はどこにも入っていない。対象は
+既定の対象は Markdown だが、選択・アンカー・描画・保存に Markdown 固有の処理は無い。
+唯一の例外は `prompt.lua` の `source_name()` で、filetype が `markdown` / `markdown.mdx`
+またはファイル名が `.md` / `.mdx` の Note を `Source: markdown` に揃える。対象は
 `config.filetypes` だけで決まり、完全一致 / glob / 述語関数を受け付ける
 （`util.is_filetype_allowed()`）。filetype 判定を追加する場合はこの関数を通すこと。
 autocmd 側で `pattern` による絞り込みをしてはいけない（glob と関数で挙動が分かれるため、
@@ -90,7 +92,14 @@ Linewise Visual (`V`) と blockwise (`<C-v>`) は `kind = "line"` に落とし�
 
 `util.lua` の `normalize()` は `vim.uv.fs_realpath()` でシンボリックリンクを解決する。
 これがないと `/tmp/x` と `/private/tmp/x` が別プロジェクト扱いになり、sidecar が分裂する。
-存在しないパスでは `fs_realpath` が nil を返すので、その場合は展開後のパスをそのまま使う。
+存在しないパス（未保存の新規ファイルなど）では `fs_realpath` が nil を返すので、存在する
+一番近い親ディレクトリを realpath 化し、残りのパス要素をつなげる。こうしないと
+`link/sub/new.md` の相対パスが `new.md` に潰れる。
+
+root を canonical 化する前の sidecar は、symlink 経由の root 表記のハッシュで保存されている。
+`store.lua` の `load()` は root を初めて読むとき保存先の `*.json` を走査し、記録された
+`root` を realpath 化すると現在の root になるものを id 重複を除いて統合する。統合後は
+canonical 側へ保存し、旧ファイルは `.migrated` に rename して残す（削除はしない）。
 
 リポジトリ内にファイルを作らないのが設計上の要件（Note 追加で Git diff を出さない）。
 保存先をリポジトリ配下へ移す変更は、この前提を崩すので慎重に。
