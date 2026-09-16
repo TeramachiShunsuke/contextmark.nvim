@@ -14,7 +14,13 @@ local function hover_lines(comments)
   local lines = {}
   for index, comment in ipairs(comments) do
     local location = util.range_label(comment.anchor.start_line, comment.anchor.end_line)
-    lines[#lines + 1] = ("Note %d/%d · %s"):format(index, #comments, location)
+    local warning = util.status_label(comment.anchor.status)
+    lines[#lines + 1] = ("Note %d/%d · %s%s"):format(
+      index,
+      #comments,
+      location,
+      warning and (" · " .. warning) or ""
+    )
     for _, line in ipairs(vim.split(comment.body, "\n", { plain = true })) do
       lines[#lines + 1] = line
     end
