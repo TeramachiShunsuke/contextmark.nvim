@@ -33,6 +33,10 @@ python3 tests/mutation_check.py
 どのテストが捕まえるかを表示する。`SURVIVED` が出たテストは何も守っていない。
 同一性・アンカー・sync ガードを変えたら必ず流す（対策のパターン文字列を直書きしているので、
 整形でずれたら `SKIP` と出る。その場合はパターンを現在のコードに合わせて更新する）。
+単独では生存するのが期待値なのは次の4件で、いずれも同じ防御を2層で持っているか、
+緑の実行では原理的に現れない修正: `rekey same-path guard off` / `move same-path guard off`
+（同じガードの2層）、`deletion tombstones off`（削除は 3-way merge の base 比較でも守られる）、
+`cquit argument bug restored`（テストが赤いときだけ効く）。
 
 テストは `tests/run.lua` 内の `test(name, callback)` を登録順に全件実行する単一ファイル方式で、
 フィルタ機構はない。1件だけ動かしたい場合は末尾のループを一時的に絞る。失敗時は `vim.cmd.cquit`
@@ -89,6 +93,11 @@ Note とファイルの対応は `comment.file`（root 相対パス）の文字�
   **指紋は更新しない**（更新すると元ファイルが戻ったときに復帰できなくなる）
 - `render.sync(bufnr)` — extmark の現在位置を読み、`anchor.capture()` し直して sidecar へ書き戻す
 
+buffer に未保存の変更がある間、`render.render` は sidecar から解決し直さず、直前に張った extmark の
+位置をメモリ上でそのまま使う（sidecar には書かない）。解決し直すと、編集に追従していた extmark を
+`BufEnter` のたびに捨てて古い行へ戻してしまい、次の `:w` がそこを recapture する。逆に sidecar へ
+書くと、下書きを `:e!` で捨てたときに Note が下書きの本文を指したまま残る。
+
 **位置を参照する処理は必ず先に `render.sync_all()` を呼ぶこと。** `init.lua` の `comments_for()` と
 `list()` がそうしている。忘れると編集中の buffer の Note が古い行番号で出力される。
 
@@ -98,17 +107,21 @@ Note とファイルの対応は `comment.file`（root 相対パス）の文字�
 `excerpt` / `before` / `after` が現在のファイル本文で上書きされ、`status` も `exact` に戻る。
 誤アタッチした Note がこれを受けると、**元の本文が復元不能に失われたうえ健全に見える**。
 
-そのため次のどちらかなら位置だけ追従し、証跡は温存する。
+そのため次の場合は recapture しない。
 
-1. ファイル同一性が `replaced`（Note の status に依らない。健全に見える Note も守る）
-2. extmark の範囲が消滅した（対象行が削除され、抽出結果が空白のみ）
+1. ファイル同一性が `replaced`（Note の status に依らない。健全に見える Note も守る）。
+   **位置も書き戻さず**、status だけを更新する
+2. extmark の範囲が消滅した（対象行が削除され、抽出結果が空白のみ）。位置だけ追従する
+3. render の時点で既に警告状態（`stale` / `orphaned`）だった。位置だけ追従する
 
 **1 を「status が warning なら」に置き換えてはいけない。** status はヒューリスティックの結果で、
 判定を外した瞬間にガードごと迂回される。
 
-**逆に、`stale` だけを理由に凍結してもいけない。** Note を付けた文を書き直すのはこのプラグインの
-中心的な用途で、そこで凍結すると Note は編集に追従せず、しかも「保存までに render が挟まったか」で
-結果が変わる非決定性が出る。`stale` は recapture して追従させる。
+3 が必要なのは、警告状態の Note の extmark は自分の本文ではなく「元の行」というフォールバック
+位置に張られているから。ここを recapture すると、無関係な行が `exact` として保存され、
+`:ContextMarkSend` 1回で `Status:` 行の無い健全な Note として agent に届く。Note を付けた文を
+書き直す中心的な用途は、render の時点では `exact` なので 3 に当たらず、従来どおり追従する
+（未保存の間に `BufEnter` が挟まっても、上の live 位置の扱いで `exact` のまま保たれる）。
 
 位置の代入は `anchor.capture` と同じ規則で clamp する（extmark は buffer 末尾の1行先を返す）。
 
@@ -116,7 +129,8 @@ Note とファイルの対応は `comment.file`（root 相対パス）の文字�
 更新すると prompt が「引用は元ファイル、行番号は別ファイル」という混ざったブロックを出し、
 Note が元々どこにあったかの記録も消える。凍結中の span は保存済み excerpt の行数から復元する
 （extmark の範囲をそのまま使うと、buffer 全体を差し替えた後に1行の excerpt に対して
-`Lines 1-61` のような矛盾した範囲が固定される）。
+`Lines 1-61` のような矛盾した範囲が固定される）。`replaced` の Note の extmark も、別ファイル側の
+一致箇所ではなく保存済みの位置（clamp 済み）に張る。
 
 **識別の基準はディスク上の本文からしか採らない**（`vim.bo[bufnr].modified` を見る）。未保存の
 下書きを基準にすると、下書きを捨てた瞬間に無変更のファイルが自分自身と一致しなくなる。
@@ -207,12 +221,26 @@ canonical 側へ保存し、旧ファイルは `.migrated` に rename して残�
 保存先をリポジトリ配下へ移す変更は、この前提を崩すので慎重に。
 
 ファイル名が root 文字列のハッシュなので、**root の決め方を変えると既存 Note が全部参照不能になる**。
-sidecar は `state.root` を持っているので、`store.adoptable(root)` が孤立した sidecar を見つけ、
-`:ContextMarkAdopt`（`init.lua` の `M.adopt`）が取り込む。候補にする条件は「記録 root が消えている」
-「現 root と親子関係にある」「**記録された `file` が現 root に実在する**」のいずれか。3つ目が無いと、
-README が案内している「cwd 由来 root からファイル自身のディレクトリへ」という移行ケースが
-候補0件になる。root の導出を変える変更は、この移行経路と README の破壊的変更の記述を
-必ずセットで更新すること。
+sidecar は `state.root` を持っているので、`store.adoptable(root)` が他の sidecar を列挙し、
+`init.lua` の `adoption_plan()` が **Note 単位で**この root に属するかを決め、`:ContextMarkAdopt` が取り込む。
+
+- 記録 root が存在する: `absolute_path(記録 root, file)` がこの root の配下にあり、
+  `project_root()` がこの root を返すものだけ（root の導出が変わっただけで、ファイルは動いていない）
+- 旧バージョンの「`.git` 無しなら cwd、cwd 外は basename」で書かれた可能性がある sidecar
+  （記録 root の上に `.git` が無い）に限り、記録パスにファイルが無く、この root に同名パスが
+  実在する Note を名前で対応づける
+- 記録 root が消えている（プロジェクトごと移動）: この root に同じパスが実在する Note だけ。
+  根拠が弱いので起動時の通知には数えない
+
+sidecar 単位でパスの形（親子関係・同名ファイルの有無）から判定すると、`README.md` を持つ
+無関係な稼働中プロジェクトや、ホーム直下の単独ファイルから見た配下の全プロジェクトが候補になり、
+他プロジェクトの Note をこちらのファイルへ写してしまう。root の導出を変える変更は、この移行経路と
+README の破壊的変更の記述を必ずセットで更新すること。
+
+同じ root の中でファイル自体が symlink だった Note（旧キー `alias.md`、新キー `real.md`）は
+別 sidecar ではないので Adopt では拾えない。`init.lua` の `canonicalize_keys()` が root ごとに
+1回、記録キーを literal に join したパスを `relative_path()` に通し、キーが変わるものを
+`store.rekey` する。
 
 **読めない sidecar は絶対に上書きしない。** `read_state_file` は「無い」と「読めない」を
 区別し、読めないとき（JSON 壊れ・未知 version）は `M.save` が理由付きで失敗を返す。
@@ -222,22 +250,32 @@ README が案内している「cwd 由来 root からファイル自身のディ
 捨てずに最小の anchor を与えて残す（本文はユーザーが書いたものなので失わせない）。
 
 `store.lua` は root ごとに state をメモリキャッシュするが、`load()` は sidecar の
-size + mtime を毎回照合し、他の Neovim が書き換えていれば読み直す。未保存のローカル編集が
-あるとき（`pending`）は読み直さず、`save()` が disk の内容を merge する。**この3つが無いと
-nvim を2窓開いているだけで片方の Note が消える。** `remove()` した id はセッション中
-tombstone として記録し、merge や読み直しで復活させない。
+inode + size + mtime を毎回照合し、他の Neovim が書き換えていれば取り込む。取り込みは
+**最後に読み書きした内容（`bases`）を基準にした 3-way merge**（`reconcile()`）で、
+基準から変わった側の変更を残す: 自分が追加・編集した Note は自分のもの、触っていない Note は
+disk のもの、基準にあって disk に無い未編集の Note は他で削除されたものとして落とす。
+「自分の id が勝つ」和集合にすると、他インスタンスの編集を巻き戻し、削除した Note を復活させる。
+**この merge・`save()` 内での再照合・ロックの3つが無いと nvim を2窓開いているだけで片方の Note が
+消える。** `remove()` した id はセッション中 tombstone として記録し、merge で復活させない。
+inode を stamp に含めるのは、書き込みが毎回 rename で新しいファイルを置くため。mtime の粒度が
+1秒のファイルシステムでは、同サイズの書き換えを size + mtime だけでは見逃す。stamp は読む前・
+ロックを外す前に取る（後に取ると、その隙間の書き込みを「読んだ」ことにしてしまう）。
 
 3つ目は `save()` の排他ロック（`<sidecar>.lock` を `fs_open(..., "wx")` で取る）。atomic rename が
 守るのは「読み手が半端なファイルを見ない」ことだけで、2つのインスタンスがそれぞれ
 read → merge → write を走らせると後の rename が先の結果を捨てる。ロックが取れなければ
 **黙って上書きせず失敗を返す**。5秒より古いロックはクラッシュの置き土産として奪う。
 
-`pending` は**変更が実際に入ったときだけ**立てる。`update()` / `remove()` が
-「comment not found」で早期 return する経路で立てていると、そのインスタンスは以後
-sidecar を一切読み直さず、次の保存で他インスタンスの変更を巻き戻す。
+`save()` はロック内で stamp を再照合し、disk が読めない状態に変わっていたら（他バージョンの
+書き込み・破損）`unreadable` を立てて拒否する。`load()` 時点の判定だけだと、その後に置き換わった
+sidecar を上書きする。
+
+symlink 経由 root の旧 sidecar を統合したとき、旧ファイルの `.migrated` への rename は
+**その後に最初に成功した保存**で行う（`retiring`）。統合時の保存が失敗したまま残すと、
+そのセッションで削除した Note が次のセッションの統合で復活する。
 
 書き込みは temp ファイル + `os.rename` の atomic replace。テストや複数 root をまたぐ処理では
-`store.reset_cache()` が必要（キャッシュ・stamp・pending・tombstone をまとめて捨てる）。
+`store.reset_cache()` が必要（キャッシュ・stamp・base・tombstone・retiring をまとめて捨てる）。
 
 sidecar のトップレベルは `version` / `root` / `comments` / `files`。`files` は追加専用フィールドで、
 `load()` が未知キーをそのまま往復させるので `version = 1` のままでよい。

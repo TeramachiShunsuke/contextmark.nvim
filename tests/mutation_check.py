@@ -14,10 +14,10 @@ TMP = os.environ.get("TMPDIR", "/tmp").rstrip("/")
 MUTATIONS = [
     # --- the sync guard and what it protects
     (
-        "sync guard off",
+        "sync freeze off",
         "lua/contextmark/render.lua",
-        "if frozen or degenerate then",
-        "if false then",
+        "        if frozen then\n",
+        "        if false then\n",
     ),
     (
         "identity verdict ignored",
@@ -26,7 +26,7 @@ MUTATIONS = [
         "local replaced = false",
     ),
     (
-        "sync freeze off",
+        "sync verdict ignored",
         "lua/contextmark/render.lua",
         'frozen = file_verdict(bufnr, root, relative, lines) == "replaced"',
         "frozen = false",
@@ -38,10 +38,28 @@ MUTATIONS = [
         "local degenerate = false",
     ),
     (
-        "stale notes frozen again",
+        "unresolved notes recaptured again",
         "lua/contextmark/render.lua",
-        "if frozen or degenerate then",
-        "if frozen or degenerate or util.is_warning_status(stored.status) then",
+        "elseif degenerate or util.is_warning_status(stored.status) then",
+        "elseif degenerate then",
+    ),
+    (
+        "live tracking discarded on re-render",
+        "lua/contextmark/render.lua",
+        "local tracked = not replaced and live[comment.id]",
+        "local tracked = false",
+    ),
+    (
+        "replaced note placed on the impostor's match",
+        "lua/contextmark/render.lua",
+        "        start_line = math.max(1, math.min(comment.anchor.start_line, count))",
+        "        do return end",
+    ),
+    (
+        "pushed extmark end not trimmed",
+        "lua/contextmark/render.lua",
+        "if end_line > start_line and end_col == 0 and span and end_line - start_line > span then",
+        "if false then",
     ),
     (
         "orphaned exception off",
@@ -144,22 +162,40 @@ MUTATIONS = [
     ),
     # --- storage
     (
-        "adoptable relatedness off",
-        "lua/contextmark/store.lua",
-        "        if missing or related or overlaps then",
-        "        if false then",
+        "adoption by root membership off",
+        "lua/contextmark/init.lua",
+        "if there:sub(1, #prefix) == prefix and util.project_root(there) == root then",
+        "if false then",
     ),
     (
         "store merge on save off",
         "lua/contextmark/store.lua",
-        "  if not same_stamp(stamps[root], stamp_of(path)) then\n    local disk = read_state_file(path)",
-        "  if false then\n    local disk = read_state_file(path)",
+        "  local stamp = stamp_of(path)\n  if not same_stamp(stamps[root], stamp) then",
+        "  local stamp = stamp_of(path)\n  if false then",
     ),
     (
         "stale cache never refreshed",
         "lua/contextmark/store.lua",
-        "if pending[root] or same_stamp(stamps[root], stamp_of(state_path(root))) then",
+        "if cached and same_stamp(stamps[root], stamp) then",
+        "if cached then",
+    ),
+    (
+        "merge lets ours win for untouched notes",
+        "lua/contextmark/store.lua",
+        "if original == nil or not vim.deep_equal(original, comment) then",
         "if true then",
+    ),
+    (
+        "save overwrites a sidecar that became unreadable",
+        "lua/contextmark/store.lua",
+        '    elseif reason ~= "absent" then\n      unreadable[root] = reason',
+        '    elseif false then\n      unreadable[root] = reason',
+    ),
+    (
+        "legacy sidecars never retired",
+        "lua/contextmark/store.lua",
+        "  if retiring[root] then",
+        "  if false then",
     ),
     (
         "deletion tombstones off",
@@ -172,12 +208,6 @@ MUTATIONS = [
         "lua/contextmark/store.lua",
         "  local lock = acquire_lock(path)\n  if not lock then",
         "  local lock = path .. \".lock\"\n  if false then",
-    ),
-    (
-        "pending set before the edit lands",
-        "lua/contextmark/store.lua",
-        "  local state = load(root)\n  for index, current in ipairs(state.comments) do",
-        "  local state = touch(root)\n  for index, current in ipairs(state.comments) do",
     ),
     (
         "rekey overwrites the destination identity",
@@ -249,20 +279,32 @@ MUTATIONS = [
     (
         "damaged anchor not repaired",
         "lua/contextmark/store.lua",
-        '      if type(comment.anchor) ~= "table" then\n        comment.anchor = { start_line = 1, end_line = 1, status = "orphaned" }\n      end',
+        '    if type(comment.anchor) ~= "table" then\n      comment.anchor = { start_line = 1, end_line = 1, status = "orphaned" }\n    end',
         "",
     ),
     (
-        "adoptable ignores files already present",
-        "lua/contextmark/store.lua",
-        "        if missing or related or overlaps then",
-        "        if missing or related then",
+        "adoption by name allows live repositories",
+        "lua/contextmark/init.lua",
+        "local by_name = not entry.missing and not has_repository(recorded)",
+        "local by_name = not entry.missing",
     ),
     (
-        "rebase remaps paths that are already right",
+        "adoption by name off",
         "lua/contextmark/init.lua",
-        "  if entry.keep_paths then",
-        "  if false then",
+        "elseif by_name and not vim.uv.fs_stat(there) and vim.uv.fs_stat(here) then",
+        "elseif false then",
+    ),
+    (
+        "moved-project adoption off",
+        "lua/contextmark/init.lua",
+        "mapped = vim.uv.fs_stat(here) and relative or false",
+        "mapped = false",
+    ),
+    (
+        "symlinked keys not canonicalized",
+        "lua/contextmark/init.lua",
+        "  if not root or canonicalized[root] then",
+        "  if true then",
     ),
     (
         "even sampling replaced by a stepped walk",
@@ -279,8 +321,8 @@ MUTATIONS = [
     (
         "replaced coordinates written back",
         "lua/contextmark/render.lua",
-        "      if\n        not replaced\n        and (",
-        "      if\n        true\n        and (",
+        "      if\n        not replaced\n        and not tracked\n        and (",
+        "      if\n        not tracked\n        and (",
     ),
     (
         "unsaved draft becomes the baseline",
