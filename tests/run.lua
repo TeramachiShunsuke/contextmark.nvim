@@ -432,8 +432,8 @@ test("matches filetypes by name, glob, and predicate", function()
   equal(util.is_filetype_allowed("markdown.mdx", defaults), true)
   equal(util.is_filetype_allowed("lua", defaults), false)
 
-  -- The dot in "markdown.mdx" must be escaped, so "markdown*" may not match
-  -- an unrelated filetype that merely shares the prefix characters.
+  -- "*" spans any characters, but a literal "." in a glob must stay literal:
+  -- "markdown.*" must not match "markdownfoo", which has no dot.
   equal(util.is_filetype_allowed("markdown.mdx", { "markdown*" }), true)
   equal(util.is_filetype_allowed("markdownfoo", { "markdown.*" }), false)
   equal(util.is_filetype_allowed("typescriptreact", { "*script*" }), true)
@@ -482,6 +482,81 @@ test("preserves nested relative paths under symlinked roots for new files", func
   equal(root, util.project_root(path_through_real))
   equal(util.relative_path(path_through_link, root), "sub/note.md")
 
+  vim.fn.delete(base, "rf")
+end)
+
+test("FileType autocmd applies glob and predicate filetypes", function()
+  local plugin = require("contextmark")
+  local storage = { dir = vim.fn.tempname() }
+
+  local function has_add_keymap(filetype)
+    vim.cmd.enew({ bang = true })
+    local bufnr = vim.api.nvim_get_current_buf()
+    vim.bo[bufnr].filetype = filetype
+    for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+      if mapping.lhs == "gmc" then
+        return true
+      end
+    end
+    return false
+  end
+
+  plugin.setup({ storage = storage, filetypes = { "markdown*" }, keymaps = { add = "gmc" } })
+  equal(has_add_keymap("markdown.mdx"), true)
+  equal(has_add_keymap("lua"), false)
+
+  plugin.setup({
+    storage = storage,
+    filetypes = function(filetype)
+      return filetype == "python"
+    end,
+    keymaps = { add = "gmc" },
+  })
+  equal(has_add_keymap("python"), true)
+  equal(has_add_keymap("markdown"), false)
+
+  vim.cmd.enew({ bang = true })
+end)
+
+test("merges sidecars saved under a symlinked root into the canonical root", function()
+  local config = require("contextmark.config")
+  local store = require("contextmark.store")
+  local util = require("contextmark.util")
+  local base = vim.fn.tempname()
+  local state_dir = base .. "/state"
+  vim.fn.mkdir(base .. "/real/.git", "p")
+  vim.fn.mkdir(state_dir, "p")
+  assert(vim.uv.fs_symlink(base .. "/real", base .. "/link", { dir = true }))
+  config.setup({ storage = { dir = state_dir } })
+  store.reset_cache()
+
+  local function note(id)
+    return { id = id, file = "note.md", body = id, created_at = id, anchor = { start_line = 1 } }
+  end
+  local function write_state(root, comments)
+    local encoded = vim.json.encode({ version = 1, root = root, comments = comments })
+    vim.fn.writefile({ encoded }, store.path(root))
+  end
+
+  -- Before canonicalization the link path itself was the root.
+  local legacy_root = vim.fs.normalize(base .. "/link")
+  local root = util.project_root(base .. "/link/note.md")
+  write_state(legacy_root, { note("cm-legacy"), note("cm-shared") })
+  write_state(root, { note("cm-shared"), note("cm-current") })
+
+  local ids = vim.tbl_map(function(comment)
+    return comment.id
+  end, store.list(root))
+  table.sort(ids)
+  equal(ids, { "cm-current", "cm-legacy", "cm-shared" })
+  equal(vim.uv.fs_stat(store.path(legacy_root)), nil)
+  assert(vim.uv.fs_stat(store.path(legacy_root) .. ".migrated"))
+
+  -- The merge is persisted, so a fresh load sees the same notes.
+  store.reset_cache()
+  equal(#store.list(root), 3)
+
+  store.reset_cache()
   vim.fn.delete(base, "rf")
 end)
 
