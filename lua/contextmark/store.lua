@@ -8,6 +8,7 @@ local states = {}
 local stamps = {}
 local pending = {}
 local removed = {}
+local unreadable = {}
 
 local function storage_dir()
   local configured = config.get().storage.dir
@@ -24,19 +25,40 @@ local function fresh(root)
   return { version = 1, root = root, comments = {} }
 end
 
+-- Returns the state, or nil plus why it could not be read. "absent" is an empty
+-- project; anything else means the file exists but we do not understand it, and
+-- those must never be treated the same. Reading a truncated sidecar as an empty
+-- project made the next save replace every note in it with nothing.
 local function read_state_file(path)
   local file = io.open(path, "r")
   if not file then
-    return nil
+    return nil, "absent"
   end
   local raw = file:read("*a")
   file:close()
   local ok, decoded = pcall(vim.json.decode, raw)
-  if ok and type(decoded) == "table" and decoded.version == 1 then
-    decoded.comments = type(decoded.comments) == "table" and decoded.comments or {}
-    return decoded
+  if not ok or type(decoded) ~= "table" then
+    return nil, "unreadable"
   end
-  return nil
+  if decoded.version ~= 1 then
+    return nil, "written by a newer version of contextmark"
+  end
+
+  decoded.comments = type(decoded.comments) == "table" and decoded.comments or {}
+  -- Repair rather than drop: the body is what the user wrote, and a note with a
+  -- damaged anchor is still worth showing. Dropping it here, or letting it
+  -- reach the comparator, loses it or throws on every later read.
+  for _, comment in ipairs(decoded.comments) do
+    if type(comment) == "table" then
+      if type(comment.anchor) ~= "table" then
+        comment.anchor = { start_line = 1, end_line = 1, status = "orphaned" }
+      end
+      comment.anchor.start_line = tonumber(comment.anchor.start_line) or 1
+      comment.anchor.end_line = tonumber(comment.anchor.end_line) or comment.anchor.start_line
+      comment.created_at = comment.created_at or ""
+    end
+  end
+  return decoded
 end
 
 local function stamp_of(path)
@@ -83,12 +105,16 @@ local function load(root)
   end
 
   local path = state_path(root)
-  local state = read_state_file(path)
+  local state, reason = read_state_file(path)
   if state then
     state.root = root
     state.comments = drop_removed(root, state.comments)
+    unreadable[root] = nil
   else
     state = fresh(root)
+    -- Remember that the file on disk holds something we could not parse, so
+    -- save() refuses to replace it with this empty state.
+    unreadable[root] = reason ~= "absent" and reason or nil
   end
   states[root] = state
   stamps[root] = stamp_of(path)
@@ -126,14 +152,19 @@ local function merge(disk, mine, root)
 end
 
 local function sort(comments)
+  -- Tolerates a damaged entry: :ContextMarkAdopt reads sidecars this instance
+  -- did not write, and one malformed note must not make every list throw.
   table.sort(comments, function(left, right)
-    if left.file ~= right.file then
-      return left.file < right.file
+    local left_file, right_file = left.file or "", right.file or ""
+    if left_file ~= right_file then
+      return left_file < right_file
     end
-    if left.anchor.start_line ~= right.anchor.start_line then
-      return left.anchor.start_line < right.anchor.start_line
+    local left_line = (left.anchor or {}).start_line or 0
+    local right_line = (right.anchor or {}).start_line or 0
+    if left_line ~= right_line then
+      return left_line < right_line
     end
-    return left.created_at < right.created_at
+    return (left.created_at or "") < (right.created_at or "")
   end)
   return comments
 end
@@ -196,16 +227,25 @@ local function acquire_lock(path)
 end
 
 local function write_state(state, path)
-  local encoded = vim.json.encode(state)
+  local ok, encoded = pcall(vim.json.encode, state)
+  if not ok then
+    return false, "could not encode the sidecar: " .. tostring(encoded)
+  end
   local temporary = ("%s.tmp-%s"):format(path, tostring(vim.uv.hrtime()))
   local file, error_message = io.open(temporary, "w")
   if not file then
     return false, error_message
   end
-  file:write(encoded)
-  file:close()
-  local ok, rename_error = os.rename(temporary, path)
-  if ok == nil then
+  -- A full disk fails here, not at open(). Ignoring these made save() report
+  -- success while leaving a truncated file in place of the notes.
+  local written, write_error = file:write(encoded)
+  local closed, close_error = file:close()
+  if not written or not closed then
+    os.remove(temporary)
+    return false, write_error or close_error or "could not write the sidecar"
+  end
+  local renamed, rename_error = os.rename(temporary, path)
+  if renamed == nil then
     os.remove(temporary)
     return false, rename_error
   end
@@ -215,6 +255,12 @@ end
 function M.save(root)
   local state = load(root)
   local path = state_path(root)
+  if unreadable[root] then
+    -- Whatever is on disk is not ours to replace. Overwriting it would turn a
+    -- damaged file into a permanently empty one.
+    return false,
+      ("refusing to overwrite an unreadable sidecar at %s (%s)"):format(path, unreadable[root])
+  end
   vim.fn.mkdir(storage_dir(), "p")
 
   local lock = acquire_lock(path)
@@ -348,17 +394,39 @@ function M.adoptable(root)
       local state = read_state_file(path)
       local recorded = state and state.root
       if state and #state.comments > 0 and type(recorded) == "string" and recorded ~= root then
-        -- Either the project that owned these notes is gone, or its root sits on
-        -- the same branch of the tree as this one (which is what a change in
-        -- root derivation looks like). A live, unrelated project keeps its own.
+        local resolved = vim.uv.fs_realpath(recorded) or recorded
         local missing = vim.uv.fs_stat(recorded) == nil
-        local related = recorded:sub(1, #root + 1) == root .. "/"
-          or root:sub(1, #recorded + 1) == recorded .. "/"
-        if missing or related then
+        -- The project that owned these notes is gone, or its root sits on the
+        -- same branch of the tree as this one -- which is what a change in root
+        -- derivation looks like.
+        local related = resolved ~= root
+          and (
+            resolved:sub(1, #root + 1) == root .. "/"
+            or root:sub(1, #resolved + 1) == resolved .. "/"
+          )
+        -- Or the files themselves are here. A root derived a different way is
+        -- often a sibling of the old one rather than an ancestor, so path shape
+        -- alone misses exactly the case the upgrade notes send people here for.
+        local overlaps = false
+        if not missing and not related then
+          for _, comment in ipairs(state.comments) do
+            local candidate = (root == "/" and "" or root) .. "/" .. tostring(comment.file)
+            if vim.uv.fs_stat(candidate) then
+              overlaps = true
+              break
+            end
+          end
+        end
+        if missing or related or overlaps then
           result[#result + 1] = {
             path = path,
             root = recorded,
             missing = missing,
+            overlaps = overlaps,
+            related = related,
+            -- The notes name files that exist here already, so their paths are
+            -- relative to this root as they stand.
+            keep_paths = missing or overlaps,
             count = #state.comments,
             state = state,
           }
@@ -382,7 +450,7 @@ function M.import(root, comments, files)
   end
 
   local added = 0
-  for _, comment in ipairs(comments or {}) do
+  for _, comment in ipairs(drop_removed(root, comments or {})) do
     if not known[comment.id] then
       state.comments[#state.comments + 1] = comment
       known[comment.id] = true
@@ -405,6 +473,7 @@ function M.reset_cache()
   stamps = {}
   pending = {}
   removed = {}
+  unreadable = {}
 end
 
 return M

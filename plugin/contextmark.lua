@@ -36,7 +36,22 @@ vim.api.nvim_create_user_command("ContextMarkMove", function(args)
     return
   end
   module().move(args.fargs[1], args.fargs[2])
-end, { nargs = "+", complete = "file" })
+end, {
+  nargs = "+",
+  -- The keys are project-relative, so file completion from the current
+  -- directory would offer paths that never match a note.
+  complete = function(argument)
+    local ok, keys = pcall(function()
+      return module().note_paths()
+    end)
+    if not ok or not keys then
+      return {}
+    end
+    return vim.tbl_filter(function(key)
+      return key:find(argument, 1, true) == 1
+    end, keys)
+  end,
+})
 
 vim.api.nvim_create_user_command("ContextMarkRelocate", function()
   module().relocate()

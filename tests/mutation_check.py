@@ -6,6 +6,7 @@ so this never needs a destructive command.
 
 import os
 import subprocess
+import sys
 
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP = os.environ.get("TMPDIR", "/tmp").rstrip("/")
@@ -27,7 +28,7 @@ MUTATIONS = [
     (
         "sync freeze off",
         "lua/contextmark/render.lua",
-        'frozen = identity.compare(store.fingerprint(root, relative), lines) == "replaced"',
+        'frozen = file_verdict(bufnr, root, relative, lines) == "replaced"',
         "frozen = false",
     ),
     (
@@ -74,16 +75,10 @@ MUTATIONS = [
         "local survival_denominator = 2",
     ),
     (
-        "identity blank-line filter off",
+        "identity small-sample rule bypassed",
         "lua/contextmark/identity.lua",
-        '    if line:match("%S") then',
-        "    if true then",
-    ),
-    (
-        "identity small-sample rule off",
-        "lua/contextmark/identity.lua",
-        '    return hits == 0 and "replaced" or "same", current',
-        '    return "same", current',
+        "  if total < ratio_floor then",
+        "  if false then",
     ),
     # --- path identity
     (
@@ -132,7 +127,7 @@ MUTATIONS = [
     (
         "prompt excerpt fallback off",
         "lua/contextmark/prompt.lua",
-        "  if util.is_warning_status(comment.anchor.status) then",
+        "  if util.is_warning_status(stored.status) then",
         "  if false then",
     ),
     (
@@ -151,7 +146,7 @@ MUTATIONS = [
     (
         "adoptable relatedness off",
         "lua/contextmark/store.lua",
-        "        if missing or related then",
+        "        if missing or related or overlaps then",
         "        if false then",
     ),
     (
@@ -218,8 +213,8 @@ MUTATIONS = [
     (
         "relocate accepts any file",
         "lua/contextmark/init.lua",
-        'if lines and identity.compare(stored, lines) == "same" then',
-        "if lines then",
+        '              and identity.compare(entry.stored, lines) == "same"',
+        "              and true",
     ),
     (
         "move destination not mapped into the root",
@@ -237,6 +232,78 @@ MUTATIONS = [
         "reanchor accepts an unsaved buffer",
         "lua/contextmark/init.lua",
         "  if vim.bo[bufnr].modified then",
+        "  if false then",
+    ),
+    (
+        "corrupt sidecar treated as empty",
+        "lua/contextmark/store.lua",
+        "  if unreadable[root] then",
+        "  if false then",
+    ),
+    (
+        "unreadable reason discarded on read",
+        "lua/contextmark/store.lua",
+        '    unreadable[root] = reason ~= "absent" and reason or nil',
+        "    unreadable[root] = nil",
+    ),
+    (
+        "damaged anchor not repaired",
+        "lua/contextmark/store.lua",
+        '      if type(comment.anchor) ~= "table" then\n        comment.anchor = { start_line = 1, end_line = 1, status = "orphaned" }\n      end',
+        "",
+    ),
+    (
+        "adoptable ignores files already present",
+        "lua/contextmark/store.lua",
+        "        if missing or related or overlaps then",
+        "        if missing or related then",
+    ),
+    (
+        "rebase remaps paths that are already right",
+        "lua/contextmark/init.lua",
+        "  if entry.keep_paths then",
+        "  if false then",
+    ),
+    (
+        "even sampling replaced by a stepped walk",
+        "lua/contextmark/identity.lua",
+        "  for step = 1, taken do\n    local index = 1 + math.floor((step - 1) * (#body - 1) / (taken - 1) + 0.5)\n    sample[#sample + 1] = digest(body[index])\n  end",
+        "  local stride = math.max(1, math.floor(#body / sample_size))\n  for index = 1, #body, stride do\n    sample[#sample + 1] = digest(body[index])\n    if #sample >= taken then\n      break\n    end\n  end",
+    ),
+    (
+        "tiny samples decide again",
+        "lua/contextmark/identity.lua",
+        '  if total < ratio_floor then\n    return "unknown", current\n  end',
+        "",
+    ),
+    (
+        "replaced coordinates written back",
+        "lua/contextmark/render.lua",
+        "      if\n        not replaced\n        and (",
+        "      if\n        true\n        and (",
+    ),
+    (
+        "unsaved draft becomes the baseline",
+        "lua/contextmark/render.lua",
+        "if fingerprint and not replaced and not undecided and not vim.bo[bufnr].modified then",
+        "if fingerprint and not replaced then",
+    ),
+    (
+        "prompt line numbers not clamped",
+        "lua/contextmark/prompt.lua",
+        "  local first = math.max(1, math.min(start_line, #lines))\n  return first, math.max(first, math.min(end_line, #lines))",
+        "  return start_line, end_line",
+    ),
+    (
+        "save ignores a failed write",
+        "lua/contextmark/store.lua",
+        "  if not written or not closed then",
+        "  if false then",
+    ),
+    (
+        "rename takes over a destination that has notes",
+        "lua/contextmark/init.lua",
+        "  if #store.list(root, relative) > 0 or store.fingerprint(root, relative) then",
         "  if false then",
     ),
     (
@@ -269,20 +336,23 @@ def run(cwd):
         text=True,
     )
     output = result.stdout + result.stderr
-    failed = [
-        line[len("not ok - ") :].split(":")[0]
-        for line in output.splitlines()
-        if line.startswith("not ok")
-    ]
+    failed = [line[len("not ok - ") :] for line in output.splitlines() if line.startswith("not ok")]
     return failed, result.returncode
 
 
 baseline, code = run(SRC)
 print("baseline: %d failing, rc=%s" % (len(baseline), code))
+for entry in baseline:
+    print("    ! %s" % entry[:160])
 print()
+
+# Optional substring filter, so one suspicious mutation can be re-run alone.
+only = sys.argv[1] if len(sys.argv) > 1 else None
 
 survived, skipped = [], []
 for index, (name, relative, old, new) in enumerate(MUTATIONS):
+    if only and only not in name:
+        continue
     work = "%s/mut-%d-%02d" % (TMP, os.getpid(), index)
     make_copy(work)
     path = os.path.join(work, relative)
@@ -296,7 +366,9 @@ for index, (name, relative, old, new) in enumerate(MUTATIONS):
         handle.write(text.replace(old, new, 1))
     failed, code = run(work)
     if failed:
-        print("%-40s caught by %d: %s" % (name, len(failed), "; ".join(failed[:2])))
+        print("%-40s caught by %d:" % (name, len(failed)))
+        for entry in failed:
+            print("    - %s" % entry[:160])
     else:
         print("%-40s SURVIVED (rc=%s)" % (name, code))
         survived.append(name)

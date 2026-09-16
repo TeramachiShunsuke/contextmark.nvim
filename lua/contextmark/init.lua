@@ -58,6 +58,17 @@ function M.add()
   local captured =
     anchor.capture(lines, start_line, end_line, config.get().storage.context_lines, selected)
 
+  if identity.compare(store.fingerprint(root, relative), lines) == "replaced" then
+    -- Otherwise the new note is born carrying a "different file?" marker with
+    -- no explanation: the flag belongs to the file, not to this note.
+    vim.notify(
+      ("contextmark: %s does not match what its existing notes were written against,"):format(
+        relative
+      ) .. " so this note will be flagged too (:ContextMarkReanchor accepts this file)",
+      vim.log.levels.WARN
+    )
+  end
+
   ui.edit("", ("Note for %s:%d-%d"):format(relative, start_line, end_line), function(body)
     local now = util.now()
     local comment = {
@@ -124,6 +135,23 @@ local function as_relative(root, value)
   return util.relative_path(util.absolute_path(root, expanded), root)
 end
 
+-- The note keys of the current project, for command completion.
+function M.note_paths()
+  local _, _, root = current_context()
+  if not root then
+    return {}
+  end
+  local seen, result = {}, {}
+  for _, comment in ipairs(store.list(root)) do
+    if not seen[comment.file] then
+      seen[comment.file] = true
+      result[#result + 1] = comment.file
+    end
+  end
+  table.sort(result)
+  return result
+end
+
 function M.move(old, new)
   local bufnr, _, root = current_context()
   if not root then
@@ -176,41 +204,67 @@ local function missing_files(root)
 end
 
 local scan_limit = 2000
+local scan_depth = 8
 
 -- Looks for the file a note's text actually moved to. Only runs on demand and
 -- only for notes whose path is gone, so the walk never happens during editing.
-local function find_relocations(root, relative)
-  local stored = store.fingerprint(root, relative)
-  if not stored then
-    return nil
+local skipped_directories = { [".git"] = true, ["node_modules"] = true, [".venv"] = true }
+
+-- One walk for every missing file. Scanning per file re-read the whole project
+-- once per note, and the skip predicate has to compare basenames because
+-- vim.fs.dir() passes root-relative paths below the top level.
+local function find_relocations(root, missing)
+  local wanted, matches = {}, {}
+  for _, relative in ipairs(missing) do
+    local stored = store.fingerprint(root, relative)
+    if stored then
+      wanted[#wanted + 1] = {
+        relative = relative,
+        stored = stored,
+        extension = relative:match("[^./]*$") or "",
+      }
+      matches[relative] = {}
+    end
+  end
+  if #wanted == 0 then
+    return matches, false
   end
 
-  local matches, scanned, truncated = {}, 0, false
-  -- Match on the missing file's own extension: a rename keeps it, and deriving
-  -- candidates from `filetypes` breaks once that is a glob or a predicate.
-  local wanted = relative:match("[^./]*$") or ""
-
+  local scanned, truncated = 0, false
   for name, kind in
     vim.fs.dir(root, {
-      depth = 8,
+      depth = scan_depth,
       skip = function(directory)
-        return directory ~= ".git"
-          and directory ~= "node_modules"
-          and directory ~= ".venv"
-          and directory ~= "target"
+        return not skipped_directories[vim.fs.basename(directory)]
       end,
     })
   do
-    if kind == "file" and (name:match("[^./]*$") or "") == wanted then
-      scanned = scanned + 1
-      if scanned > scan_limit then
-        truncated = true
-        break
+    if kind == "file" then
+      local extension = name:match("[^./]*$") or ""
+      local interesting = false
+      for _, entry in ipairs(wanted) do
+        if entry.extension == extension and entry.relative ~= name then
+          interesting = true
+          break
+        end
       end
-      if name ~= relative then
+      if interesting then
+        scanned = scanned + 1
+        if scanned > scan_limit then
+          truncated = true
+          break
+        end
         local lines = util.read_buffer_or_file(util.absolute_path(root, name))
-        if lines and identity.compare(stored, lines) == "same" then
-          matches[#matches + 1] = name
+        if lines then
+          for _, entry in ipairs(wanted) do
+            if
+              entry.extension == extension
+              and entry.relative ~= name
+              and identity.compare(entry.stored, lines) == "same"
+            then
+              table.insert(matches[entry.relative], name)
+            end
+          end
         end
       end
     end
@@ -231,37 +285,33 @@ function M.relocate()
     return
   end
 
-  local unmatched, without_fingerprint = {}, {}
+  local matches, capped = find_relocations(root, missing)
   local relocations = {}
-  local capped = false
   for _, relative in ipairs(missing) do
-    local matches, truncated = find_relocations(root, relative)
-    capped = capped or truncated or false
-    if not matches then
-      without_fingerprint[#without_fingerprint + 1] = relative
-    elseif #matches == 0 then
-      unmatched[#unmatched + 1] = relative
+    local found = matches[relative]
+    if not found then
+      vim.notify(
+        ("contextmark: %s has no recorded identity; use :ContextMarkMove"):format(relative),
+        vim.log.levels.WARN
+      )
+    elseif #found == 0 then
+      vim.notify(
+        (
+          "contextmark: could not find where %s went"
+          .. " (searched %d directories deep, up to %d files%s)"
+        ):format(
+          relative,
+          scan_depth,
+          scan_limit,
+          capped and ", and stopped at that limit" or ""
+        ),
+        vim.log.levels.WARN
+      )
     else
-      for _, match in ipairs(matches) do
-        relocations[#relocations + 1] = { from = relative, to = match }
+      for _, name in ipairs(found) do
+        relocations[#relocations + 1] = { from = relative, to = name }
       end
     end
-  end
-
-  if capped then
-    vim.notify(
-      ("contextmark: stopped after %d files; some directories were not searched"):format(scan_limit),
-      vim.log.levels.WARN
-    )
-  end
-  for _, relative in ipairs(without_fingerprint) do
-    vim.notify(
-      ("contextmark: %s has no recorded identity; use :ContextMarkMove"):format(relative),
-      vim.log.levels.WARN
-    )
-  end
-  for _, relative in ipairs(unmatched) do
-    vim.notify(("contextmark: could not find where %s went"):format(relative), vim.log.levels.WARN)
   end
   if #relocations == 0 then
     return
@@ -278,13 +328,28 @@ function M.relocate()
     end
     local ok, moved, error_message = store.rekey(root, entry.from, entry.to)
     notify_save(ok, error_message)
-    if ok then
-      vim.notify(
-        ("contextmark: moved %d note(s) to %s"):format(moved, entry.to),
-        vim.log.levels.INFO
-      )
-      render.render(bufnr)
+    if not ok then
+      return
     end
+    -- Only one pick per run, so say what is still waiting rather than letting
+    -- the rest look handled.
+    local remaining = 0
+    for _, candidate in ipairs(relocations) do
+      if candidate.from ~= entry.from then
+        remaining = remaining + 1
+      end
+    end
+    vim.notify(
+      ("contextmark: moved %d note(s) to %s%s"):format(
+        moved,
+        entry.to,
+        remaining > 0
+            and (", %d more candidate(s) left; run :ContextMarkRelocate again"):format(remaining)
+          or ""
+      ),
+      vim.log.levels.INFO
+    )
+    render.render(bufnr)
   end)
 end
 
@@ -319,6 +384,13 @@ function M.reanchor()
     ),
   }, function(choice)
     if choice ~= "Accept this file" then
+      return
+    end
+    -- The prompt may be answered long after it was asked, and by then the
+    -- buffer can be gone or renamed.
+    local _, current_root, current_relative = util.buffer_context(bufnr)
+    if current_root ~= root or current_relative ~= relative then
+      vim.notify("contextmark: this buffer changed; nothing was re-anchored", vim.log.levels.WARN)
       return
     end
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
@@ -356,8 +428,9 @@ end
 -- Maps the relative paths of an unattached sidecar onto this root.
 local function rebase(entry, root)
   local map
-  if entry.missing then
-    -- The whole project moved, so paths inside it are unchanged.
+  if entry.keep_paths then
+    -- The project moved wholesale, or its files are already sitting here under
+    -- these very paths. Either way the paths inside it are unchanged.
     map = function(relative)
       return relative
     end
@@ -490,6 +563,20 @@ local function settle_rename(bufnr)
   if #store.list(root, before.file) == 0 then
     return
   end
+  -- Do not take over a file that already has notes of its own. A name change
+  -- does not tell us whose text the buffer holds, and merging two files' notes
+  -- silently is worse than leaving them where they are.
+  if #store.list(root, relative) > 0 or store.fingerprint(root, relative) then
+    vim.notify(
+      ("contextmark: %s already has notes, so the %d note(s) on %s were left alone"):format(
+        relative,
+        #store.list(root, before.file),
+        before.file
+      ) .. " (use :ContextMarkMove to move them)",
+      vim.log.levels.WARN
+    )
+    return
+  end
   local ok, moved, error_message = store.rekey(root, before.file, relative)
   notify_save(ok, error_message)
   if ok and moved > 0 then
@@ -515,12 +602,17 @@ local function announce_adoptable(bufnr)
     return
   end
   local candidates = store.adoptable(root)
-  if #candidates == 0 then
-    return
-  end
   local total = 0
   for _, entry in ipairs(candidates) do
-    total = total + entry.count
+    -- A project that merely vanished somewhere else is not this project's
+    -- business. Only mention sidecars whose files are here, or whose root sits
+    -- on this branch of the tree.
+    if entry.overlaps or entry.related then
+      total = total + entry.count
+    end
+  end
+  if total == 0 then
+    return
   end
   vim.notify(
     ("contextmark: %d note(s) in %d sidecar(s) are not attached to this project root."):format(

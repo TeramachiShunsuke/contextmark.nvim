@@ -14,8 +14,9 @@ local M = {}
 -- Enough lines to make the ratio meaningful without storing the document.
 local sample_size = 32
 
--- Below this many samples a ratio means nothing, so only "nothing survived"
--- decides.
+-- Below this many samples nothing can be concluded: a short file shares its
+-- heading with any other short file, so both accusing and clearing it would be
+-- guesswork.
 local ratio_floor = 10
 
 -- A file has to lose more than nine tenths of its lines to be called a
@@ -38,10 +39,12 @@ local function canonical(line)
   return trimmed
 end
 
--- Distinct canonical lines in document order. Blank lines are dropped because
--- they match anything, and repeats are dropped because a file with a repeating
--- structure (a table, a command list) would otherwise fill the whole sample
--- with one digest and match any other file sharing that single line.
+-- Distinct canonical lines in document order. Repeats are dropped because a
+-- file with a repeating structure (a table, a command list) would otherwise
+-- fill the whole sample with one digest and match any other file sharing that
+-- single line. Blank lines are dropped for the same reason -- they match
+-- anything -- though with distinctness in place they could only ever contribute
+-- one entry, so that part is clarity rather than a load-bearing rule.
 local function significant(lines)
   local seen, result = {}, {}
   for _, line in ipairs(lines) do
@@ -56,34 +59,50 @@ local function significant(lines)
   return result
 end
 
-function M.fingerprint(lines)
-  local body = significant(lines)
+-- Spread the sample evenly across the document by position. Walking with a
+-- floor()ed step instead made the sample run out inside the first 32 lines for
+-- any document with 33 to 63 significant lines -- the most ordinary size there
+-- is -- which weighted the opening of the file at the expense of everything
+-- after it. That is backwards twice over: rewriting an introduction looked like
+-- a new document, while two unrelated documents sharing a licence header or
+-- front matter looked like the same one.
+local function sample_of(body)
+  local taken = math.min(sample_size, #body)
   local sample = {}
-  if #body > 0 then
-    -- Spread the sample across the whole document: a prefix would miss an
-    -- append-only edit and over-weight a shared header.
-    local step = math.max(1, math.floor(#body / sample_size))
-    for index = 1, #body, step do
-      sample[#sample + 1] = digest(body[index])
-      if #sample >= sample_size then
-        break
-      end
-    end
+  if taken == 1 then
+    sample[1] = digest(body[1])
+    return sample
   end
-  return {
+  for step = 1, taken do
+    local index = 1 + math.floor((step - 1) * (#body - 1) / (taken - 1) + 0.5)
+    sample[#sample + 1] = digest(body[index])
+  end
+  return sample
+end
+
+-- Returns the fingerprint and the canonical lines it was built from, so a
+-- comparison does not walk the document twice.
+local function describe(lines)
+  local body = significant(lines)
+  local current = {
     digest = digest(table.concat(lines, "\n")),
     lines = #lines,
     significant = #body,
-    sample = sample,
+    sample = sample_of(body),
   }
+  return current, body
+end
+
+function M.fingerprint(lines)
+  return (describe(lines))
 end
 
 -- Returns "same" / "replaced" / "unknown" plus the fingerprint of `lines`.
--- "unknown" means there is nothing to compare against yet, which is the state of
--- every note written before fingerprints existed; callers must treat it as "do
--- not accuse this file" rather than as a replacement.
+-- "unknown" means no conclusion, which is the state of every note written
+-- before fingerprints existed and of every file too short to judge; callers
+-- must treat it as "do not accuse this file" rather than as a replacement.
 function M.compare(stored, lines)
-  local current = M.fingerprint(lines)
+  local current, body = describe(lines)
   if type(stored) ~= "table" or type(stored.sample) ~= "table" then
     return "unknown", current
   end
@@ -91,8 +110,13 @@ function M.compare(stored, lines)
     return "same", current
   end
 
+  local total = #stored.sample
+  if total < ratio_floor then
+    return "unknown", current
+  end
+
   local present = {}
-  for _, value in ipairs(significant(lines)) do
+  for _, value in ipairs(body) do
     present[digest(value)] = true
   end
   local hits = 0
@@ -100,14 +124,6 @@ function M.compare(stored, lines)
     if present[entry] then
       hits = hits + 1
     end
-  end
-
-  local total = #stored.sample
-  if total == 0 then
-    return "unknown", current
-  end
-  if total < ratio_floor then
-    return hits == 0 and "replaced" or "same", current
   end
   return hits * survival_denominator < total and "replaced" or "same", current
 end

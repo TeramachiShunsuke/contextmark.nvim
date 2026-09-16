@@ -12,6 +12,48 @@ local function buffer_context(bufnr)
   return util.buffer_context(bufnr)
 end
 
+-- The identity verdict for a buffer, remembered per change. A single :w runs
+-- both sync and render, and every BufEnter runs render again, so recomputing
+-- hashed the whole document several times for one user action.
+local verdicts = {}
+
+local function file_verdict(bufnr, root, relative, lines)
+  local stored = store.fingerprint(root, relative)
+  local tick = vim.b[bufnr].changedtick
+  local cached = verdicts[bufnr]
+  if cached and cached.tick == tick and cached.relative == relative and cached.stored == stored then
+    return cached.verdict, cached.fingerprint
+  end
+  local verdict, fingerprint = identity.compare(stored, lines)
+  verdicts[bufnr] = {
+    tick = tick,
+    relative = relative,
+    stored = stored,
+    verdict = verdict,
+    fingerprint = fingerprint,
+  }
+  return verdict, fingerprint
+end
+
+-- Reported once per root: a sidecar that cannot be written means the notes just
+-- made are not on disk, and this used to be swallowed entirely.
+local reported = {}
+
+local function persist(root)
+  local ok, error_message = store.save(root)
+  if ok then
+    reported[root] = nil
+    return
+  end
+  if not reported[root] then
+    reported[root] = true
+    vim.notify(
+      "contextmark: could not save sidecar: " .. tostring(error_message),
+      vim.log.levels.ERROR
+    )
+  end
+end
+
 -- Highest-severity status wins when several notes share a line.
 local severity_rank = { ok = 0, stale = 1, mismatch = 2 }
 
@@ -113,8 +155,15 @@ function M.render(bufnr)
   -- Decide once, for the file as a whole, whether this is still the file the
   -- notes were written against. Per-note context cannot answer that.
   local verdict, fingerprint = "unknown", nil
+  local suspected = false
+  for _, comment in ipairs(comments) do
+    if util.is_warning_status(comment.anchor.status) then
+      suspected = true
+      break
+    end
+  end
   if #comments > 0 then
-    verdict, fingerprint = identity.compare(store.fingerprint(root, relative), lines)
+    verdict, fingerprint = file_verdict(bufnr, root, relative, lines)
   end
   local replaced = verdict == "replaced"
 
@@ -126,18 +175,27 @@ function M.render(bufnr)
         -- line at the very same position -- but it is not this note's text.
         status = replaced_status(status)
       end
+      if comment.anchor.status ~= status then
+        comment.anchor.status = status
+        dirty = true
+      end
+      -- Store the resolved position only while this is still the note's own
+      -- file. Writing a replacement's coordinates back would make the prompt
+      -- name this file's line numbers while quoting the original text, and
+      -- would discard the last record of where the note actually was.
       if
-        comment.anchor.start_line ~= start_line
-        or comment.anchor.end_line ~= end_line
-        or comment.anchor.start_col ~= start_col
-        or comment.anchor.end_col ~= end_col
-        or comment.anchor.status ~= status
+        not replaced
+        and (
+          comment.anchor.start_line ~= start_line
+          or comment.anchor.end_line ~= end_line
+          or comment.anchor.start_col ~= start_col
+          or comment.anchor.end_col ~= end_col
+        )
       then
         comment.anchor.start_line = start_line
         comment.anchor.end_line = end_line
         comment.anchor.start_col = start_col
         comment.anchor.end_col = end_col
-        comment.anchor.status = status
         dirty = true
       end
 
@@ -186,7 +244,13 @@ function M.render(bufnr)
   -- Refresh the identity baseline only while it still holds. Keeping the old
   -- fingerprint through a replacement is what lets the notes recover on their
   -- own once the real file comes back to this path.
-  if fingerprint and not replaced then
+  -- Only from text that is on disk: adopting an unsaved draft as the baseline
+  -- leaves the note flagged against its own file once the draft is discarded.
+  -- With no baseline yet and a note that already failed to resolve, there is
+  -- nothing to say which file is the right one, and recording this one would
+  -- make whichever was opened first the answer forever.
+  local undecided = verdict == "unknown" and suspected
+  if fingerprint and not replaced and not undecided and not vim.bo[bufnr].modified then
     local stored = store.fingerprint(root, relative)
     if not stored or stored.digest ~= fingerprint.digest then
       store.set_fingerprint(root, relative, fingerprint)
@@ -195,7 +259,7 @@ function M.render(bufnr)
   end
 
   if dirty then
-    store.save(root)
+    persist(root)
   end
 end
 
@@ -213,7 +277,7 @@ function M.sync(bufnr)
   -- note that resolved as healthy in a replacement file is protected too.
   local frozen = false
   if #comments > 0 then
-    frozen = identity.compare(store.fingerprint(root, relative), lines) == "replaced"
+    frozen = file_verdict(bufnr, root, relative, lines) == "replaced"
   end
 
   local line_count = math.max(#lines, 1)
@@ -250,14 +314,25 @@ function M.sync(bufnr)
           -- collapsing, NOT on the note's status: a note that still resolves
           -- cleanly inside a replacement file needs the same protection, and a
           -- note whose text was merely edited must still follow that edit.
-          stored.start_line = first
-          stored.end_line = last
-          stored.start_col = first_col
-          stored.end_col = last_col
           if frozen then
+            -- Follow the start only, and keep the span the stored excerpt
+            -- describes. Taking the extmark's range here recorded "Lines 1-61"
+            -- next to a one-line excerpt once the buffer had been replaced
+            -- wholesale.
+            local span = math.max(1, #(stored.excerpt or {}))
+            stored.start_line = first
+            stored.end_line = clamp_line(first + span - 1)
+            stored.start_col = clamp_col(stored.start_line, stored.start_col or 0)
+            stored.end_col = clamp_col(stored.end_line, stored.end_col or 0)
             stored.status = replaced_status(stored.status)
-          elseif not util.is_warning_status(stored.status) then
-            stored.status = "stale"
+          else
+            stored.start_line = first
+            stored.end_line = last
+            stored.start_col = first_col
+            stored.end_col = last_col
+            if not util.is_warning_status(stored.status) then
+              stored.status = "stale"
+            end
           end
         else
           comment.anchor = anchor.capture(lines, first, last, config.get().storage.context_lines, {
@@ -273,7 +348,7 @@ function M.sync(bufnr)
   end
 
   if dirty then
-    store.save(root)
+    persist(root)
   end
 end
 

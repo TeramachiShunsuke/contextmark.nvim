@@ -694,8 +694,14 @@ test("flags a mismatch even when the excerpt moved to another line", function()
   vim.cmd.enew({ bang = true })
 
   local comment = store.list(root, "docs/a.md")[1]
+  local text = prompt.build(root, { comment })
   equal(comment.anchor.status, "mismatch")
-  equal(comment.anchor.start_line, 9)
+  -- The stored position stays where the note actually was. Adopting the
+  -- impostor's line number would make the prompt quote the original text under
+  -- this file's coordinates, and would throw away the last record of the note's
+  -- own place in its file.
+  equal(comment.anchor.start_line, marked_at)
+  assert(text:find("Line " .. marked_at .. "\n", 1, true), "the prompt moved the note")
 end)
 
 test("keeps the mismatch verdict through blank-padded Markdown", function()
@@ -806,12 +812,51 @@ test("compares file identity by surviving content", function()
 
   -- Blank lines carry no signal, so a document made only of them is undecidable
   -- rather than a replacement.
-  equal(select(1, identity.compare(identity.fingerprint({ "", "", "" }), { "x" })), "unknown")
+  local blank_only = {}
+  for index = 1, 14 do
+    blank_only[index] = index % 2 == 0 and "" or "   "
+  end
+  equal(select(1, identity.compare(identity.fingerprint(blank_only), { "x" })), "unknown")
 
-  -- A sample too small for a ratio only decides when nothing at all survived.
+  -- A document too short to judge is left alone in both directions. Accusing on
+  -- a handful of lines is guesswork, and it used to make :ContextMarkRelocate
+  -- offer every short file as a candidate for every other one.
   local tiny = identity.fingerprint({ "only line" })
-  equal(select(1, identity.compare(tiny, { "only line", "added" })), "same")
-  equal(select(1, identity.compare(tiny, { "something else" })), "replaced")
+  equal(select(1, identity.compare(tiny, { "only line", "added" })), "unknown")
+  equal(select(1, identity.compare(tiny, { "something else" })), "unknown")
+end)
+
+test("samples the whole document, not just its opening", function()
+  local identity = require("contextmark.identity")
+  -- 60 significant lines. A stepped walk used to spend the whole sample inside
+  -- the first 32 of them, so everything after that carried no weight at all.
+  local body = {}
+  for index = 1, 60 do
+    body[index] = "paragraph " .. index .. " of the original document"
+  end
+  local baseline = identity.fingerprint(body)
+
+  -- Rewriting the opening half is ordinary editing, and with the sample spread
+  -- across the document the untouched half still speaks for it.
+  local front_rewritten = vim.deepcopy(body)
+  for index = 1, 31 do
+    front_rewritten[index] = "rewritten opening " .. index
+  end
+  equal(select(1, identity.compare(baseline, front_rewritten)), "same")
+
+  -- The same has to hold for the other end of the file.
+  local tail_rewritten = vim.deepcopy(body)
+  for index = 30, 60 do
+    tail_rewritten[index] = "rewritten ending " .. index
+  end
+  equal(select(1, identity.compare(baseline, tail_rewritten)), "same")
+
+  -- And a genuinely different document is still caught.
+  local unrelated = {}
+  for index = 1, 60 do
+    unrelated[index] = "a completely unrelated sentence " .. index
+  end
+  equal(select(1, identity.compare(baseline, unrelated)), "replaced")
 end)
 
 test("marks an unresolved note in the prompt it sends", function()
@@ -903,8 +948,8 @@ test("labels every unresolved status", function()
 end)
 
 test("renders and preserves a note whose file became empty", function()
-  local root, store = fixture({ ["docs/a.md"] = { "# Doc", "intro", "- [ ] item", "tail" } })
-  add_note(root, "docs/a.md", 3, 3)
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
   vim.fn.writefile({}, root .. "/docs/a.md")
 
   local render = require("contextmark.render")
@@ -919,10 +964,13 @@ test("renders and preserves a note whose file became empty", function()
 
   -- An empty file used to make resolve() return nil, which dropped the note
   -- from the render loop: the note vanished instead of being flagged.
+  -- An emptied file loses every line, which reads as a replacement. It is not
+  -- one: reporting "different file?" for a file the author just cleared would
+  -- be wrong, and the sign has to stay the unresolved one.
   equal(#extmarks, 1)
   equal(extmarks[1][4].sign_text, "? ")
   equal(comment.anchor.status, "orphaned")
-  equal(comment.anchor.excerpt, { "- [ ] item" })
+  equal(comment.anchor.excerpt, { marked_line })
 end)
 
 -- Writes the sidecar behind the cache's back, the way a second Neovim instance
@@ -1394,10 +1442,11 @@ end)
 test("lets a stale rename intent expire instead of firing later", function()
   local root, store = fixture({
     ["docs/spec.md"] = document("Alpha"),
+    -- The destination deliberately has no notes of its own, so nothing but the
+    -- expiry stands between an unrelated deletion and a wrong move.
     ["docs/draft.md"] = document("Beta"),
   })
   add_note(root, "docs/spec.md", marked_at, marked_at, "spec note")
-  add_note(root, "docs/draft.md", marked_at, marked_at, "draft note")
 
   vim.cmd.edit(root .. "/docs/spec.md")
   -- :file renames the buffer only. spec.md is still on disk, so nothing moves.
@@ -1420,7 +1469,7 @@ test("lets a stale rename intent expire instead of firing later", function()
 
   equal(after_rename, 1)
   equal(spec_notes, 1)
-  equal(draft_notes, 1)
+  equal(draft_notes, 0)
 end)
 
 test("refuses to move notes outside the project root", function()
@@ -1586,6 +1635,236 @@ test("falls back to the stored excerpt when the file has nothing there", functio
   })
   util.read_buffer_or_file = original_reader
   assert(text:find("> the noted sentence", 1, true), "the stored excerpt was not used")
+end)
+
+test("refuses to overwrite a sidecar it cannot read", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at, "precious")
+  local path = store.path(root)
+  local intact = table.concat(vim.fn.readfile(path), "\n")
+
+  -- Truncate the file the way an interrupted write or a full disk would. The
+  -- damaged bytes are what has to survive: whether any particular note body is
+  -- still inside them depends on JSON key order, which is not deterministic.
+  local damaged = intact:sub(1, math.floor(#intact / 2))
+  vim.fn.writefile({ damaged }, path)
+  store.reset_cache()
+
+  -- Reading it as an empty project and saving over it used to replace every
+  -- note in the file with nothing.
+  equal(#store.list(root), 0)
+  local saved, reason = store.save(root)
+  local still_there = table.concat(vim.fn.readfile(path), "\n")
+
+  equal(saved, false)
+  assert(reason and reason:find("unreadable", 1, true), "the reason did not explain itself")
+  equal(still_there, damaged)
+
+  -- A sidecar from a newer version is refused for the same reason.
+  vim.fn.writefile({ vim.json.encode({ version = 99, comments = {} }) }, path)
+  store.reset_cache()
+  local future_saved, future_reason = store.save(root)
+  equal(future_saved, false)
+  assert(future_reason and future_reason:find("newer version", 1, true), future_reason)
+end)
+
+test("survives a note whose anchor is damaged", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at, "healthy")
+  local path = store.path(root)
+  local decoded = vim.json.decode(table.concat(vim.fn.readfile(path), "\n"))
+  decoded.comments[#decoded.comments + 1] = {
+    id = "cm-damaged",
+    file = "docs/a.md",
+    filetype = "markdown",
+    body = "the body is still worth keeping",
+  }
+  vim.fn.writefile({ vim.json.encode(decoded) }, path)
+  store.reset_cache()
+
+  -- Listing used to throw on the missing anchor, which broke every command.
+  local ok, comments = pcall(store.list, root, "docs/a.md")
+  assert(ok, tostring(comments))
+  equal(#comments, 2)
+  local bodies = { comments[1].body, comments[2].body }
+  table.sort(bodies)
+  equal(bodies, { "healthy", "the body is still worth keeping" })
+end)
+
+test("adopts a sidecar whose files are already in this project", function()
+  local root, store, util = fixture({ ["notes/todo.md"] = document("Alpha") })
+  local plugin = require("contextmark")
+  local now = util.now()
+
+  -- What the previous version wrote for a tree without a repository marker: the
+  -- root came from the current directory, so it is a sibling of the root this
+  -- version derives, and the notes name files that do exist here.
+  local previous_root = util.normalize(vim.fn.tempname())
+  vim.fn.mkdir(previous_root, "p")
+  equal(
+    store.add(previous_root, {
+      id = "cm-previous-1",
+      file = "notes/todo.md",
+      filetype = "markdown",
+      body = "written before the upgrade",
+      created_at = now,
+      updated_at = now,
+      anchor = {
+        kind = "line",
+        start_line = marked_at,
+        end_line = marked_at,
+        start_col = 0,
+        end_col = #marked_line,
+        excerpt = { marked_line },
+        status = "exact",
+      },
+    }),
+    true
+  )
+
+  vim.cmd.edit(root .. "/notes/todo.md")
+  local candidates = store.adoptable(root)
+  with_select(function(items, _, on_choice)
+    on_choice(items[1])
+  end, plugin.adopt)
+  local adopted = store.list(root, "notes/todo.md")
+  vim.cmd.enew({ bang = true })
+
+  equal(#candidates, 1)
+  equal(candidates[1].overlaps, true)
+  equal(#adopted, 1)
+  equal(adopted[1].body, "written before the upgrade")
+end)
+
+test("does not take an unsaved draft as the file's identity", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+
+  local render = require("contextmark.render")
+  vim.cmd.edit(root .. "/docs/a.md")
+  local bufnr = vim.api.nvim_get_current_buf()
+  render.render(bufnr)
+  local baseline = store.fingerprint(root, "docs/a.md")
+
+  -- Append a long draft without saving, then throw it away. The draft is still
+  -- recognisably this file, so the baseline would be replaced by text that was
+  -- never on disk, and the untouched file would end up flagged against itself.
+  local draft = document("Alpha")
+  for index = 1, 40 do
+    draft[#draft + 1] = "an unsaved paragraph " .. index
+  end
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, draft)
+  render.render(bufnr)
+  local during = store.fingerprint(root, "docs/a.md")
+  vim.cmd.edit({ args = { root .. "/docs/a.md" }, bang = true })
+  local restored_buffer = vim.api.nvim_get_current_buf()
+  render.render(restored_buffer)
+  local comment = store.list(root, "docs/a.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  equal(during, baseline)
+  equal(comment.anchor.status, "exact")
+end)
+
+test("never names a line the file does not have", function()
+  local util = require("contextmark.util")
+  local original_reader = util.read_buffer_or_file
+  util.read_buffer_or_file = function()
+    return { "one", "two", "three" }
+  end
+  local healthy = prompt.build("/project", {
+    {
+      file = "note.md",
+      filetype = "markdown",
+      body = "keep this",
+      -- The file was truncated while it was closed, so the stored range is
+      -- past its end while the status still says the note resolved.
+      anchor = {
+        start_line = 38,
+        end_line = 39,
+        start_col = 0,
+        end_col = 0,
+        excerpt = { "the noted sentence" },
+        status = "exact",
+      },
+    },
+  })
+  local flagged = prompt.build("/project", {
+    {
+      file = "note.md",
+      filetype = "markdown",
+      body = "keep this",
+      anchor = {
+        start_line = 38,
+        end_line = 39,
+        start_col = 0,
+        end_col = 0,
+        excerpt = { "the noted sentence" },
+        status = "mismatch",
+      },
+    },
+  })
+  util.read_buffer_or_file = original_reader
+
+  assert(not healthy:find("Lines 38", 1, true), "the prompt named a line past the end of the file")
+  assert(not flagged:find("Lines 38", 1, true), "the flagged prompt named a line past the end")
+  assert(healthy:find("> the noted sentence", 1, true), "the stored excerpt was dropped")
+end)
+
+test("reports a sidecar write that fails part way", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local path = store.path(root)
+  local intact = table.concat(vim.fn.readfile(path), "\n")
+
+  -- A full disk fails at write(), not at open(). Ignoring that reported success
+  -- while leaving a truncated file where the notes used to be.
+  local original_open = io.open
+  io.open = function(target, mode)
+    if mode == "w" then
+      return {
+        write = function()
+          return nil, "no space left on device"
+        end,
+        close = function()
+          return true
+        end,
+      }
+    end
+    return original_open(target, mode)
+  end
+  store.set_fingerprint(root, "docs/a.md", { digest = "forces-a-write", sample = {} })
+  local ok, reason = store.save(root)
+  io.open = original_open
+
+  equal(ok, false)
+  assert(reason and reason:find("no space", 1, true), tostring(reason))
+  -- The sidecar that was already there must be untouched.
+  equal(table.concat(vim.fn.readfile(path), "\n"), intact)
+end)
+
+test("leaves a rename alone when the destination already has notes", function()
+  local root, store = fixture({
+    ["docs/spec.md"] = document("Alpha"),
+    ["docs/draft.md"] = document("Beta"),
+  })
+  add_note(root, "docs/spec.md", marked_at, marked_at, "spec note")
+  add_note(root, "docs/draft.md", marked_at, marked_at, "draft note")
+
+  vim.cmd.edit(root .. "/docs/spec.md")
+  vim.cmd.file(root .. "/docs/draft.md")
+  -- The original disappears while the rename intent is still fresh, so only the
+  -- destination check stands between this and two files' notes being merged.
+  equal(vim.fn.delete(root .. "/docs/spec.md"), 0)
+  local ok, failure = pcall(vim.cmd.doautocmd, "BufEnter")
+  assert(ok, failure)
+  local spec_notes = #store.list(root, "docs/spec.md")
+  local draft_notes = store.list(root, "docs/draft.md")
+  vim.cmd.enew({ bang = true })
+
+  equal(spec_notes, 1)
+  equal(#draft_notes, 1)
+  equal(draft_notes[1].body, "draft note")
 end)
 
 local failures = 0
