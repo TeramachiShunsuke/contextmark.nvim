@@ -92,6 +92,54 @@ local function drop_removed(root, comments)
   return kept
 end
 
+-- Sidecars written before roots were canonicalized are keyed by the path the
+-- project was opened through (e.g. a symlink). Find those whose recorded root
+-- now resolves to `root` so their notes are not silently hidden.
+local function legacy_state_paths(root)
+  local directory = storage_dir()
+  if not vim.uv.fs_stat(directory) then
+    return {}
+  end
+  local current = state_path(root)
+  local result = {}
+  for name, kind in vim.fs.dir(directory) do
+    local path = directory .. "/" .. name
+    if kind == "file" and name:match("%.json$") and path ~= current then
+      local state = read_state_file(path)
+      local recorded = state and state.root
+      local resolved = type(recorded) == "string" and vim.uv.fs_realpath(recorded)
+      if resolved and resolved ~= recorded and vim.fs.normalize(resolved) == root then
+        result[#result + 1] = { path = path, state = state }
+      end
+    end
+  end
+  return result
+end
+
+local merge
+
+-- Folds legacy sidecars into the freshly loaded state and persists the result.
+-- The old files are renamed only after that save succeeds, so a failed write
+-- leaves them in place for the next session to retry.
+local function migrate_legacy(root)
+  local legacy = legacy_state_paths(root)
+  if #legacy == 0 then
+    return
+  end
+  local state = states[root]
+  for _, item in ipairs(legacy) do
+    state = merge(item.state, state, root)
+  end
+  states[root] = state
+  pending[root] = true
+  if M.save(root) then
+    -- Keep the old file for recovery, but out of the *.json scan.
+    for _, item in ipairs(legacy) do
+      os.rename(item.path, item.path .. ".migrated")
+    end
+  end
+end
+
 local function load(root)
   local cached = states[root]
   if cached then
@@ -118,7 +166,13 @@ local function load(root)
   end
   states[root] = state
   stamps[root] = stamp_of(path)
-  return state
+  -- Only on the first read of a root: later reloads come from another instance
+  -- writing the canonical sidecar, which cannot create new legacy files. An
+  -- unreadable canonical sidecar is left alone, since save() would refuse it.
+  if cached == nil and not unreadable[root] then
+    migrate_legacy(root)
+  end
+  return states[root]
 end
 
 -- Marks the cached state as holding edits that are not on disk yet, so the
@@ -130,7 +184,7 @@ local function touch(root)
 end
 
 -- Folds the notes another instance wrote into ours.
-local function merge(disk, mine, root)
+function merge(disk, mine, root)
   local known = {}
   for _, comment in ipairs(mine.comments) do
     known[comment.id] = true
