@@ -415,6 +415,21 @@ test("resolves a symlinked project root to one location", function()
   vim.fn.delete(base, "rf")
 end)
 
+test("preserves nested relative paths under symlinked roots for new files", function()
+  local util = require("contextmark.util")
+  local base = vim.fn.tempname()
+  vim.fn.mkdir(base .. "/real/.git", "p")
+  assert(vim.uv.fs_symlink(base .. "/real", base .. "/link", { dir = true }))
+
+  local path_through_link = base .. "/link/sub/note.md"
+  local path_through_real = base .. "/real/sub/note.md"
+  local root = util.project_root(path_through_link)
+  equal(root, util.project_root(path_through_real))
+  equal(util.relative_path(path_through_link, root), "sub/note.md")
+
+  vim.fn.delete(base, "rf")
+end)
+
 local failures = 0
 for _, item in ipairs(tests) do
   local ok, error_message = pcall(item.callback)

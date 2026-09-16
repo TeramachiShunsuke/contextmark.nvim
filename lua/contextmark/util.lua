@@ -1,13 +1,43 @@
 -- Shared utilities for contextmark.nvim.
 local M = {}
 
+local function resolve_existing_ancestor(path)
+  local resolved = vim.uv.fs_realpath(path)
+  if resolved then
+    return resolved
+  end
+
+  local suffix = {}
+  local current = path
+  while true do
+    local parent = vim.fs.dirname(current)
+    if not parent or parent == current then
+      return path
+    end
+
+    suffix[#suffix + 1] = vim.fn.fnamemodify(current, ":t")
+    current = parent
+    resolved = vim.uv.fs_realpath(current)
+    if resolved then
+      for index = #suffix, 1, -1 do
+        if resolved == "/" then
+          resolved = resolved .. suffix[index]
+        else
+          resolved = resolved .. "/" .. suffix[index]
+        end
+      end
+      return resolved
+    end
+  end
+end
+
 local function normalize(path)
   local expanded = vim.fs.normalize(vim.fn.fnamemodify(path, ":p"))
   -- Resolve symlinks so that the same file reached through different paths
   -- (/tmp/x vs /private/tmp/x on macOS) maps to one project root and sidecar.
-  -- fs_realpath returns nil for paths that do not exist yet; keep the literal
-  -- path in that case.
-  local resolved = vim.uv.fs_realpath(expanded) or expanded
+  -- For paths that do not exist yet, resolve the nearest existing parent and
+  -- append the remaining suffix so relative_path() keeps the same subtree.
+  local resolved = resolve_existing_ancestor(expanded)
   return (vim.fs.normalize(resolved):gsub("/$", ""))
 end
 
