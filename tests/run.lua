@@ -1098,7 +1098,7 @@ test("adopts notes from a sidecar whose project root moved", function()
   )
 
   vim.cmd.edit(root .. "/docs/a.md")
-  local candidates = store.adoptable(root)
+  local candidates = plugin.adoption_candidates(root)
   with_select(function(items, _, on_choice)
     on_choice(items[1])
   end, plugin.adopt)
@@ -1134,7 +1134,7 @@ test("leaves a live unrelated project's sidecar alone", function()
     true
   )
 
-  equal(#store.adoptable(root), 0)
+  equal(#require("contextmark").adoption_candidates(root), 0)
 end)
 
 test("moves notes to a new path on request", function()
@@ -1404,15 +1404,16 @@ test("recovers a stale note by following the edit on save", function()
   vim.api.nvim_buf_set_lines(bufnr, marked_at - 1, marked_at, false, { "- [x] shipped it" })
 
   -- Looking at another buffer and coming back used to decide the outcome: the
-  -- intervening render marked the note stale, and a stale note was then frozen
-  -- so it never followed the edit.
+  -- intervening render re-resolved from the sidecar, lost the extmark that had
+  -- followed the edit, and marked the note stale. It now keeps the live
+  -- position while the buffer is modified.
   render.render(bufnr)
   local before_save = store.list(root, "docs/a.md")[1].anchor.status
   render.sync(bufnr)
   local comment = store.list(root, "docs/a.md")[1]
   vim.cmd.enew({ bang = true })
 
-  equal(before_save, "stale")
+  equal(before_save, "exact")
   equal(comment.anchor.status, "exact")
   equal(comment.anchor.excerpt, { "- [x] shipped it" })
 end)
@@ -1723,7 +1724,7 @@ test("adopts a sidecar whose files are already in this project", function()
   )
 
   vim.cmd.edit(root .. "/notes/todo.md")
-  local candidates = store.adoptable(root)
+  local candidates = plugin.adoption_candidates(root)
   with_select(function(items, _, on_choice)
     on_choice(items[1])
   end, plugin.adopt)
@@ -1731,7 +1732,7 @@ test("adopts a sidecar whose files are already in this project", function()
   vim.cmd.enew({ bang = true })
 
   equal(#candidates, 1)
-  equal(candidates[1].overlaps, true)
+  equal(candidates[1].count, 1)
   equal(#adopted, 1)
   equal(adopted[1].body, "written before the upgrade")
 end)
@@ -1940,6 +1941,369 @@ test("merges sidecars saved under a symlinked root into the canonical root", fun
 
   store.reset_cache()
   vim.fn.delete(base, "rf")
+end)
+
+-- A second Neovim instance: its own copy of the store's module state, reading and
+-- writing the same sidecar directory. Restores this instance's module afterwards.
+local function with_other_instance(body)
+  local mine = package.loaded["contextmark.store"]
+  package.loaded["contextmark.store"] = nil
+  local ok, failure = pcall(body, require("contextmark.store"))
+  package.loaded["contextmark.store"] = mine
+  if not ok then
+    error(failure, 0)
+  end
+end
+
+local function plain_note(id, body)
+  return {
+    id = id,
+    file = "note.md",
+    body = body or id,
+    created_at = id,
+    anchor = { start_line = 1, end_line = 1 },
+  }
+end
+
+test("keeps another instance's edits and deletions after a failed save", function()
+  local root, store = fixture({ ["note.md"] = { "hello" } })
+  equal(store.add(root, plain_note("cm-x", "old")), true)
+  equal(store.add(root, plain_note("cm-z")), true)
+
+  -- A save that fails (here: the sidecar is locked) used to pin the cache, so
+  -- this instance never saw later changes and its next save wrote them away.
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({}, lock)
+  local locked = store.add(root, plain_note("cm-a1"))
+  vim.uv.fs_unlink(lock)
+  equal(locked, false)
+
+  with_other_instance(function(other)
+    local x = vim.deepcopy(other.list(root)[1])
+    x.body = "new from the other instance"
+    equal(other.update(root, x), true)
+    equal(other.remove(root, "cm-z"), true)
+  end)
+
+  equal(store.add(root, plain_note("cm-a2")), true)
+  local bodies = {}
+  with_other_instance(function(other)
+    for _, comment in ipairs(other.list(root)) do
+      bodies[comment.id] = comment.body
+    end
+  end)
+  equal(bodies, {
+    ["cm-a1"] = "cm-a1",
+    ["cm-a2"] = "cm-a2",
+    ["cm-x"] = "new from the other instance",
+  })
+end)
+
+test("refuses to overwrite a sidecar that became unreadable after a failed save", function()
+  local root, store = fixture({ ["note.md"] = { "hello" } })
+  equal(store.add(root, plain_note("cm-x")), true)
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({}, lock)
+  equal(store.add(root, plain_note("cm-a1")), false)
+  vim.uv.fs_unlink(lock)
+
+  -- A newer contextmark rewrote the sidecar in the meantime.
+  local newer = vim.json.encode({ version = 2, root = root, notes = { { id = "v2" } } })
+  vim.fn.writefile({ newer }, store.path(root))
+
+  local ok = store.add(root, plain_note("cm-a2"))
+  equal(ok, false)
+  equal(vim.fn.readfile(store.path(root)), { newer })
+end)
+
+test("does not bring back a deleted legacy note when the migration save failed", function()
+  local config = require("contextmark.config")
+  local store = require("contextmark.store")
+  local util = require("contextmark.util")
+  local base = vim.fn.tempname()
+  local state_dir = base .. "/state"
+  vim.fn.mkdir(base .. "/real/.git", "p")
+  vim.fn.mkdir(state_dir, "p")
+  assert(vim.uv.fs_symlink(base .. "/real", base .. "/link", { dir = true }))
+  config.setup({ storage = { dir = state_dir } })
+  store.reset_cache()
+
+  local legacy_root = vim.fs.normalize(base .. "/link")
+  local root = util.project_root(base .. "/real/note.md")
+  local encoded =
+    vim.json.encode({ version = 1, root = legacy_root, comments = { plain_note("cm-legacy") } })
+  vim.fn.writefile({ encoded }, store.path(legacy_root))
+
+  -- The save attempted during migration fails, so the legacy file stays.
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({}, lock)
+  equal(#store.list(root), 1)
+  vim.uv.fs_unlink(lock)
+  equal(vim.uv.fs_stat(store.path(legacy_root)) ~= nil, true)
+
+  -- The first save that does succeed must retire it, or the next session merges
+  -- the deleted note back in.
+  equal(store.remove(root, "cm-legacy"), true)
+  equal(vim.uv.fs_stat(store.path(legacy_root)), nil)
+  store.reset_cache()
+  equal(#store.list(root), 0)
+
+  store.reset_cache()
+  vim.fn.delete(base, "rf")
+end)
+
+test("sends an unresolved note with its stored excerpt, not the text now at its line", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha"), ["docs/z.md"] = { "z" } })
+  local noted_at = 7
+  add_note(root, "docs/a.md", noted_at, noted_at, "fix wording")
+  local original = store.list(root, "docs/a.md")[1].anchor.excerpt
+
+  -- Edited while closed: two lines added on top, and the noted line reworded.
+  local edited = document("Alpha")
+  edited[noted_at] = "Alpha second heading"
+  table.insert(edited, 1, "intro")
+  table.insert(edited, 2, "")
+  vim.fn.writefile(edited, root .. "/docs/a.md")
+
+  local plugin = require("contextmark")
+  vim.cmd.edit(root .. "/docs/a.md")
+  local rendered = store.list(root, "docs/a.md")[1].anchor.status
+  -- Send runs sync_all, which used to recapture the fallback line as "exact".
+  local text = plugin.build_prompt("all")
+  local comment = store.list(root, "docs/a.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  equal(rendered, "stale")
+  equal(comment.anchor.status, "stale")
+  equal(comment.anchor.excerpt, original)
+  assert(text:find("Status: unresolved", 1, true), "the prompt carried no status")
+  assert(text:find("> " .. original[1], 1, true), "the prompt lost the stored excerpt")
+end)
+
+test("keeps a mismatched note's recorded line through a send", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local impostor = document("Beta")
+  impostor[marked_at] = "Beta heading 1"
+  impostor[40] = marked_line
+  vim.fn.writefile(impostor, root .. "/docs/a.md")
+
+  local plugin = require("contextmark")
+  vim.cmd.edit(root .. "/docs/a.md")
+  -- Unlike prompt.build(), build_prompt() syncs the open buffer first. Syncing
+  -- used to copy the extmark's line -- the impostor's match -- into the sidecar.
+  local text = plugin.build_prompt("all")
+  local comment = store.list(root, "docs/a.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  equal(comment.anchor.status, "mismatch")
+  equal(comment.anchor.start_line, marked_at)
+  assert(text:find("Line " .. marked_at .. "\n", 1, true), "the prompt moved the note")
+end)
+
+test("re-keys a note recorded under a symlinked file in the same project", function()
+  local root, store = fixture({ ["docs/real.md"] = document("Alpha") })
+  assert(vim.uv.fs_symlink(root .. "/docs/real.md", root .. "/docs/alias.md"))
+  local util = require("contextmark.util")
+  local now = util.now()
+  -- What the previous version stored when the file was opened through the link.
+  equal(
+    store.add(root, {
+      id = "cm-alias",
+      file = "docs/alias.md",
+      filetype = "markdown",
+      body = "written through the link",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(document("Alpha"), marked_at, marked_at, 2),
+    }),
+    true
+  )
+
+  vim.cmd.edit(root .. "/docs/real.md")
+  local bufnr = vim.api.nvim_get_current_buf()
+  local extmarks =
+    vim.api.nvim_buf_get_extmarks(bufnr, require("contextmark.render").namespace(), 0, -1, {})
+  local notes = store.list(root, "docs/real.md")
+  vim.cmd.enew({ bang = true })
+
+  equal(#notes, 1)
+  equal(notes[1].body, "written through the link")
+  equal(#store.list(root, "docs/alias.md"), 0)
+  equal(#extmarks, 1)
+end)
+
+test("does not offer a live project's notes because a file name also exists here", function()
+  local root, store, util = fixture({ ["README.md"] = document("Mine") })
+  local other = util.normalize(vim.fn.tempname())
+  vim.fn.mkdir(other .. "/.git", "p")
+  vim.fn.writefile(document("Other"), other .. "/README.md")
+  local now = util.now()
+  equal(
+    store.add(other, {
+      id = "cm-other-readme",
+      file = "README.md",
+      filetype = "markdown",
+      body = "belongs to the other project",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(document("Other"), marked_at, marked_at, 2),
+    }),
+    true
+  )
+
+  equal(#require("contextmark").adoption_candidates(root), 0)
+end)
+
+test("does not offer projects below a loose file's directory", function()
+  local base = vim.fn.tempname()
+  vim.fn.mkdir(base .. "/develop/proj/.git", "p")
+  vim.fn.writefile({ "# todo" }, base .. "/todo.md")
+  vim.fn.writefile(document("Proj"), base .. "/develop/proj/README.md")
+  local store = require("contextmark.store")
+  local util = require("contextmark.util")
+  store.reset_cache()
+  require("contextmark").setup({ storage = { dir = vim.fn.tempname() } })
+  local project = util.project_root(base .. "/develop/proj/README.md")
+  local loose = util.project_root(base .. "/todo.md")
+  local now = util.now()
+  equal(
+    store.add(project, {
+      id = "cm-proj",
+      file = "README.md",
+      filetype = "markdown",
+      body = "project note",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(document("Proj"), marked_at, marked_at, 2),
+    }),
+    true
+  )
+
+  -- The loose file's root is an ancestor of the project. The project's notes
+  -- still belong to the project, not to that ancestor.
+  equal(#require("contextmark").adoption_candidates(loose), 0)
+  vim.fn.delete(base, "rf")
+end)
+
+-- Runs `between` after save() has loaded the cache but before it takes the lock:
+-- the window where only the re-check inside the lock can see another writer.
+local function between_load_and_lock(between, body)
+  local original = vim.fn.mkdir
+  local fired = false
+  vim.fn.mkdir = function(...)
+    if not fired then
+      fired = true
+      between()
+    end
+    return original(...)
+  end
+  local ok, failure = pcall(body)
+  vim.fn.mkdir = original
+  if not ok then
+    error(failure, 0)
+  end
+end
+
+test("merges a write that lands between loading and locking", function()
+  local root, store = fixture({ ["note.md"] = { "hello" } })
+  equal(store.add(root, plain_note("cm-x", "old")), true)
+  between_load_and_lock(function()
+    with_other_instance(function(other)
+      local x = vim.deepcopy(other.list(root)[1])
+      x.body = "edited in the gap"
+      equal(other.update(root, x), true)
+    end)
+  end, function()
+    equal(store.add(root, plain_note("cm-a")), true)
+  end)
+
+  local bodies = {}
+  with_other_instance(function(other)
+    for _, comment in ipairs(other.list(root)) do
+      bodies[comment.id] = comment.body
+    end
+  end)
+  equal(bodies, { ["cm-a"] = "cm-a", ["cm-x"] = "edited in the gap" })
+end)
+
+test("refuses a sidecar that became unreadable between loading and locking", function()
+  local root, store = fixture({ ["note.md"] = { "hello" } })
+  equal(store.add(root, plain_note("cm-x")), true)
+  local newer = vim.json.encode({ version = 2, root = root, notes = { { id = "v2" } } })
+  between_load_and_lock(function()
+    vim.fn.writefile({ newer }, store.path(root))
+  end, function()
+    equal(store.add(root, plain_note("cm-a")), false)
+  end)
+  equal(vim.fn.readfile(store.path(root)), { newer })
+end)
+
+test("adopts notes whose root is now derived one level down", function()
+  local root, store, util = fixture({ ["docs/a.md"] = document("Alpha") })
+  -- The same files, recorded under a root above this one: only the way the root
+  -- is derived changed, so each key has to be re-based, not kept.
+  local parent = vim.fs.dirname(root)
+  local leaf = vim.fs.basename(root)
+  local now = util.now()
+  equal(
+    store.add(parent, {
+      id = "cm-parent",
+      file = leaf .. "/docs/a.md",
+      filetype = "markdown",
+      body = "recorded from above",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(document("Alpha"), marked_at, marked_at, 2),
+    }),
+    true
+  )
+
+  local candidates = require("contextmark").adoption_candidates(root)
+  equal(#candidates, 1)
+  equal(candidates[1].comments[1].file, "docs/a.md")
+end)
+
+test("does not match a live repository's notes by name", function()
+  local root, store, util = fixture({ ["README.md"] = document("Mine") })
+  -- A project with .git never keyed files by bare name, so its README.md note is
+  -- not this project's README.md even after its own copy was deleted.
+  local other = util.normalize(vim.fn.tempname())
+  vim.fn.mkdir(other .. "/.git", "p")
+  local now = util.now()
+  equal(
+    store.add(other, {
+      id = "cm-other-readme",
+      file = "README.md",
+      filetype = "markdown",
+      body = "belongs to the other project",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(document("Other"), marked_at, marked_at, 2),
+    }),
+    true
+  )
+
+  equal(#require("contextmark").adoption_candidates(root), 0)
+end)
+
+test("keeps a mismatched note's line past the end of a shorter replacement", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  local noted_at = 50
+  add_note(root, "docs/a.md", noted_at, noted_at)
+  local impostor = vim.list_slice(document("Beta"), 1, 30)
+  vim.fn.writefile(impostor, root .. "/docs/a.md")
+
+  local render = require("contextmark.render")
+  vim.cmd.edit(root .. "/docs/a.md")
+  render.render(vim.api.nvim_get_current_buf())
+  local comment = store.list(root, "docs/a.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  equal(comment.anchor.status, "mismatch")
+  -- Clamped for display only. Writing the clamped line back would lose where
+  -- the note was in its own file.
+  equal(comment.anchor.start_line, noted_at)
 end)
 
 local failures = 0

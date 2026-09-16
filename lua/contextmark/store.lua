@@ -2,13 +2,16 @@ local config = require("contextmark.config")
 
 local M = {}
 -- Cached sidecar contents, plus what is needed to notice that another Neovim
--- instance has written the same file: the stat we read it at, whether we hold
--- unsaved edits, and the ids we deliberately removed this session.
+-- instance has written the same file: the stat we read it at, the contents we
+-- last read or wrote (the base a concurrent change is compared against), and the
+-- ids we deliberately removed this session.
 local states = {}
 local stamps = {}
-local pending = {}
+local bases = {}
 local removed = {}
 local unreadable = {}
+-- Legacy sidecars already folded into a root, waiting for a successful save.
+local retiring = {}
 
 local function storage_dir()
   local configured = config.get().storage.dir
@@ -44,19 +47,25 @@ local function read_state_file(path)
     return nil, "written by a newer version of contextmark"
   end
 
-  decoded.comments = type(decoded.comments) == "table" and decoded.comments or {}
+  local comments = {}
+  for _, comment in ipairs(type(decoded.comments) == "table" and decoded.comments or {}) do
+    -- A non-table entry carries no note to keep, and would throw in every
+    -- comparator and merge that indexes it.
+    if type(comment) == "table" then
+      comments[#comments + 1] = comment
+    end
+  end
+  decoded.comments = comments
   -- Repair rather than drop: the body is what the user wrote, and a note with a
   -- damaged anchor is still worth showing. Dropping it here, or letting it
   -- reach the comparator, loses it or throws on every later read.
   for _, comment in ipairs(decoded.comments) do
-    if type(comment) == "table" then
-      if type(comment.anchor) ~= "table" then
-        comment.anchor = { start_line = 1, end_line = 1, status = "orphaned" }
-      end
-      comment.anchor.start_line = tonumber(comment.anchor.start_line) or 1
-      comment.anchor.end_line = tonumber(comment.anchor.end_line) or comment.anchor.start_line
-      comment.created_at = comment.created_at or ""
+    if type(comment.anchor) ~= "table" then
+      comment.anchor = { start_line = 1, end_line = 1, status = "orphaned" }
     end
+    comment.anchor.start_line = tonumber(comment.anchor.start_line) or 1
+    comment.anchor.end_line = tonumber(comment.anchor.end_line) or comment.anchor.start_line
+    comment.created_at = comment.created_at or ""
   end
   return decoded
 end
@@ -66,14 +75,20 @@ local function stamp_of(path)
   if not info then
     return nil
   end
-  return { size = info.size, sec = info.mtime.sec, nsec = info.mtime.nsec }
+  -- Every writer renames a fresh temp file into place, so the inode changes on
+  -- each write. Size and mtime alone miss a same-size rewrite on filesystems
+  -- whose mtime only has one-second resolution.
+  return { ino = info.ino, size = info.size, sec = info.mtime.sec, nsec = info.mtime.nsec }
 end
 
 local function same_stamp(left, right)
   if left == nil or right == nil then
     return left == right
   end
-  return left.size == right.size and left.sec == right.sec and left.nsec == right.nsec
+  return left.ino == right.ino
+    and left.size == right.size
+    and left.sec == right.sec
+    and left.nsec == right.nsec
 end
 
 -- Deletions made this session outlive a reload or a merge; otherwise a
@@ -90,6 +105,95 @@ local function drop_removed(root, comments)
     end
   end
   return kept
+end
+
+local function by_id(comments)
+  local result = {}
+  for _, comment in ipairs(comments or {}) do
+    if comment.id ~= nil then
+      result[comment.id] = comment
+    end
+  end
+  return result
+end
+
+-- Folds what another instance wrote (`disk`) into ours (`mine`), using the last
+-- sidecar we read or wrote (`base`) to tell whose change each difference is.
+--
+-- A plain "ours wins by id" union cannot do this: it reverts the other
+-- instance's edits to notes we never touched and resurrects the notes it
+-- deleted. Comparing both sides against the base keeps each side's own changes.
+local function reconcile(base, mine, disk, root)
+  base = base or { comments = {} }
+  local base_ids, disk_ids = by_id(base.comments), by_id(disk.comments)
+  local tombstones = removed[root] or {}
+  local comments, seen = {}, {}
+  for _, comment in ipairs(mine.comments) do
+    local id = comment.id
+    if id == nil then
+      comments[#comments + 1] = comment
+    else
+      seen[id] = true
+      local original = base_ids[id]
+      if original == nil or not vim.deep_equal(original, comment) then
+        -- Added or edited here.
+        comments[#comments + 1] = comment
+      elseif disk_ids[id] then
+        -- Untouched here, so theirs is at least as new.
+        comments[#comments + 1] = disk_ids[id]
+      end
+      -- Untouched here and gone from disk: deleted there.
+    end
+  end
+  for _, comment in ipairs(disk.comments) do
+    local id = comment.id
+    -- Present in the base but not here means we deleted it.
+    if id ~= nil and not seen[id] and base_ids[id] == nil and not tombstones[id] then
+      comments[#comments + 1] = comment
+    end
+  end
+
+  local files = {}
+  local keys = {}
+  for _, side in ipairs({ base.files, mine.files, disk.files }) do
+    for relative in pairs(type(side) == "table" and side or {}) do
+      keys[relative] = true
+    end
+  end
+  for relative in pairs(keys) do
+    local original = type(base.files) == "table" and base.files[relative] or nil
+    local ours = type(mine.files) == "table" and mine.files[relative] or nil
+    local theirs = type(disk.files) == "table" and disk.files[relative] or nil
+    if vim.deep_equal(original, ours) then
+      files[relative] = theirs
+    else
+      files[relative] = ours
+    end
+  end
+
+  mine.comments = comments
+  mine.files = next(files) and files or nil
+  return mine
+end
+
+-- Adds the notes and fingerprints of `other` that `state` does not have yet.
+local function absorb(state, other, root)
+  local known = by_id(state.comments)
+  for _, comment in ipairs(drop_removed(root, other.comments)) do
+    if comment.id ~= nil and not known[comment.id] then
+      known[comment.id] = comment
+      state.comments[#state.comments + 1] = comment
+    end
+  end
+  if type(other.files) == "table" then
+    state.files = state.files or {}
+    for relative, fingerprint in pairs(other.files) do
+      if state.files[relative] == nil then
+        state.files[relative] = fingerprint
+      end
+    end
+  end
+  return state
 end
 
 -- Sidecars written before roots were canonicalized are keyed by the path the
@@ -116,11 +220,10 @@ local function legacy_state_paths(root)
   return result
 end
 
-local merge
-
--- Folds legacy sidecars into the freshly loaded state and persists the result.
--- The old files are renamed only after that save succeeds, so a failed write
--- leaves them in place for the next session to retry.
+-- Folds legacy sidecars into the freshly loaded state. The old files are renamed
+-- by the first save that succeeds afterwards, not only by the save attempted
+-- here: if that one fails, a later successful save still retires them, so a note
+-- deleted in the meantime is not merged back in by the next session.
 local function migrate_legacy(root)
   local legacy = legacy_state_paths(root)
   if #legacy == 0 then
@@ -128,44 +231,47 @@ local function migrate_legacy(root)
   end
   local state = states[root]
   for _, item in ipairs(legacy) do
-    state = merge(item.state, state, root)
+    absorb(state, item.state, root)
   end
-  states[root] = state
-  pending[root] = true
-  if M.save(root) then
-    -- Keep the old file for recovery, but out of the *.json scan.
-    for _, item in ipairs(legacy) do
-      os.rename(item.path, item.path .. ".migrated")
-    end
-  end
+  retiring[root] = vim.tbl_map(function(item)
+    return item.path
+  end, legacy)
+  M.save(root)
 end
 
 local function load(root)
   local cached = states[root]
-  if cached then
-    -- Unsaved local edits win; otherwise pick up a sidecar that another Neovim
-    -- instance has written since we read it. Without this the cache was held
-    -- for the whole session and the next save replaced their notes with our
-    -- stale copy.
-    if pending[root] or same_stamp(stamps[root], stamp_of(state_path(root))) then
-      return cached
-    end
+  local path = state_path(root)
+  -- Stat before reading: a write landing in between is then seen as a change
+  -- on the next load, instead of being recorded as already read.
+  local stamp = stamp_of(path)
+  if cached and same_stamp(stamps[root], stamp) then
+    return cached
   end
 
-  local path = state_path(root)
-  local state, reason = read_state_file(path)
-  if state then
-    state.root = root
-    state.comments = drop_removed(root, state.comments)
+  local disk, reason = read_state_file(path)
+  if disk then
+    disk.root = root
+    disk.comments = drop_removed(root, disk.comments)
     unreadable[root] = nil
+    -- Another instance wrote the sidecar since we read it. Fold its changes into
+    -- ours rather than replacing the cache, which would drop edits that are only
+    -- in memory (including ones whose save failed).
+    states[root] = cached and reconcile(bases[root], cached, disk, root) or disk
+    bases[root] = vim.deepcopy(disk)
   else
-    state = fresh(root)
     -- Remember that the file on disk holds something we could not parse, so
-    -- save() refuses to replace it with this empty state.
+    -- save() refuses to replace it.
     unreadable[root] = reason ~= "absent" and reason or nil
+    if not cached then
+      states[root] = fresh(root)
+    end
+    if reason == "absent" then
+      -- Nothing on disk to compare against: everything in memory is ours.
+      bases[root] = nil
+    end
   end
-  states[root] = state
-  stamps[root] = stamp_of(path)
+  stamps[root] = stamp
   -- Only on the first read of a root: later reloads come from another instance
   -- writing the canonical sidecar, which cannot create new legacy files. An
   -- unreadable canonical sidecar is left alone, since save() would refuse it.
@@ -173,36 +279,6 @@ local function load(root)
     migrate_legacy(root)
   end
   return states[root]
-end
-
--- Marks the cached state as holding edits that are not on disk yet, so the
--- load() inside save() cannot discard them.
-local function touch(root)
-  local state = load(root)
-  pending[root] = true
-  return state
-end
-
--- Folds the notes another instance wrote into ours.
-function merge(disk, mine, root)
-  local known = {}
-  for _, comment in ipairs(mine.comments) do
-    known[comment.id] = true
-  end
-  for _, comment in ipairs(drop_removed(root, disk.comments)) do
-    if not known[comment.id] then
-      mine.comments[#mine.comments + 1] = comment
-    end
-  end
-  if type(disk.files) == "table" then
-    mine.files = mine.files or {}
-    for relative, fingerprint in pairs(disk.files) do
-      if mine.files[relative] == nil then
-        mine.files[relative] = fingerprint
-      end
-    end
-  end
-  return mine
 end
 
 local function sort(comments)
@@ -239,7 +315,7 @@ end
 -- fingerprint refresh rides along with a write that was going to happen anyway
 -- instead of touching the disk on every BufEnter.
 function M.set_fingerprint(root, relative, fingerprint)
-  local state = touch(root)
+  local state = load(root)
   state.files = state.files or {}
   state.files[relative] = fingerprint
 end
@@ -309,11 +385,14 @@ end
 function M.save(root)
   local state = load(root)
   local path = state_path(root)
-  if unreadable[root] then
+  local function refuse()
     -- Whatever is on disk is not ours to replace. Overwriting it would turn a
     -- damaged file into a permanently empty one.
     return false,
       ("refusing to overwrite an unreadable sidecar at %s (%s)"):format(path, unreadable[root])
+  end
+  if unreadable[root] then
+    return refuse()
   end
   vim.fn.mkdir(storage_dir(), "p")
 
@@ -324,23 +403,42 @@ function M.save(root)
     return false, "sidecar is locked by another Neovim instance"
   end
 
-  -- Fold in anything written since we read the file. A second Neovim instance
-  -- editing the same project would otherwise lose every note it added.
-  if not same_stamp(stamps[root], stamp_of(path)) then
-    local disk = read_state_file(path)
+  -- Fold in anything written between load() and taking the lock. A second
+  -- Neovim instance editing the same project would otherwise lose its changes.
+  local stamp = stamp_of(path)
+  if not same_stamp(stamps[root], stamp) then
+    local disk, reason = read_state_file(path)
     if disk then
-      state = merge(disk, state, root)
+      disk.root = root
+      disk.comments = drop_removed(root, disk.comments)
+      state = reconcile(bases[root], state, disk, root)
       states[root] = state
+    elseif reason ~= "absent" then
+      unreadable[root] = reason
+      stamps[root] = stamp
+      vim.uv.fs_unlink(lock)
+      return refuse()
     end
   end
 
   local ok, error_message = write_state(state, path)
-  vim.uv.fs_unlink(lock)
   if not ok then
+    vim.uv.fs_unlink(lock)
     return false, error_message
   end
+  -- Stat before releasing the lock, so a writer waiting on it cannot slip a
+  -- change in that we would then record as already read.
   stamps[root] = stamp_of(path)
-  pending[root] = nil
+  bases[root] = vim.deepcopy(state)
+  vim.uv.fs_unlink(lock)
+
+  if retiring[root] then
+    -- Keep the old files for recovery, but out of the *.json scan.
+    for _, legacy in ipairs(retiring[root]) do
+      os.rename(legacy, legacy .. ".migrated")
+    end
+    retiring[root] = nil
+  end
   return true
 end
 
@@ -355,21 +453,16 @@ function M.list(root, relative_file)
 end
 
 function M.add(root, comment)
-  local state = touch(root)
+  local state = load(root)
   state.comments[#state.comments + 1] = comment
   return M.save(root)
 end
 
 function M.update(root, comment)
-  -- pending is set only once the edit has actually landed. Setting it up front
-  -- meant a miss ("comment not found", e.g. another instance deleted the note)
-  -- left the cache marked dirty forever, so this instance stopped reloading the
-  -- sidecar and its next save rolled back everything the other one had done.
   local state = load(root)
   for index, current in ipairs(state.comments) do
     if current.id == comment.id then
       state.comments[index] = comment
-      pending[root] = true
       return M.save(root)
     end
   end
@@ -385,7 +478,7 @@ function M.rekey(root, from, to)
     return true, 0
   end
 
-  local state = touch(root)
+  local state = load(root)
   local moved = 0
   for _, comment in ipairs(state.comments) do
     if comment.file == from then
@@ -412,7 +505,6 @@ function M.remove(root, id)
     if comment.id == id then
       local relative = comment.file
       table.remove(state.comments, index)
-      pending[root] = true
       -- Remember the deletion so a merge with a concurrent writer cannot bring
       -- it back.
       removed[root] = removed[root] or {}
@@ -434,6 +526,9 @@ end
 -- string -- moving or renaming the project, or a change to how the root is
 -- derived -- leaves the notes on disk but out of reach. Every sidecar records
 -- the root it was written for, which is what makes them findable again.
+--
+-- Every such sidecar is returned. Deciding which of their notes belong to `root`
+-- needs path arithmetic, which is the caller's job.
 function M.adoptable(root)
   local directory = storage_dir()
   if not vim.uv.fs_stat(directory) then
@@ -448,43 +543,12 @@ function M.adoptable(root)
       local state = read_state_file(path)
       local recorded = state and state.root
       if state and #state.comments > 0 and type(recorded) == "string" and recorded ~= root then
-        local resolved = vim.uv.fs_realpath(recorded) or recorded
-        local missing = vim.uv.fs_stat(recorded) == nil
-        -- The project that owned these notes is gone, or its root sits on the
-        -- same branch of the tree as this one -- which is what a change in root
-        -- derivation looks like.
-        local related = resolved ~= root
-          and (
-            resolved:sub(1, #root + 1) == root .. "/"
-            or root:sub(1, #resolved + 1) == resolved .. "/"
-          )
-        -- Or the files themselves are here. A root derived a different way is
-        -- often a sibling of the old one rather than an ancestor, so path shape
-        -- alone misses exactly the case the upgrade notes send people here for.
-        local overlaps = false
-        if not missing and not related then
-          for _, comment in ipairs(state.comments) do
-            local candidate = (root == "/" and "" or root) .. "/" .. tostring(comment.file)
-            if vim.uv.fs_stat(candidate) then
-              overlaps = true
-              break
-            end
-          end
-        end
-        if missing or related or overlaps then
-          result[#result + 1] = {
-            path = path,
-            root = recorded,
-            missing = missing,
-            overlaps = overlaps,
-            related = related,
-            -- The notes name files that exist here already, so their paths are
-            -- relative to this root as they stand.
-            keep_paths = missing or overlaps,
-            count = #state.comments,
-            state = state,
-          }
-        end
+        result[#result + 1] = {
+          path = path,
+          root = recorded,
+          missing = vim.uv.fs_stat(recorded) == nil,
+          state = state,
+        }
       end
     end
   end
@@ -497,7 +561,7 @@ end
 -- Adds notes that this root does not already have. The caller is responsible for
 -- rebasing `file` onto this root first; store does not do path arithmetic.
 function M.import(root, comments, files)
-  local state = touch(root)
+  local state = load(root)
   local known = {}
   for _, comment in ipairs(state.comments) do
     known[comment.id] = true
@@ -525,7 +589,8 @@ end
 function M.reset_cache()
   states = {}
   stamps = {}
-  pending = {}
+  bases = {}
+  retiring = {}
   removed = {}
   unreadable = {}
 end

@@ -13,9 +13,12 @@ local M = {}
 local configured = false
 local map_buffer
 
+local canonicalize_keys
+
 local function initialize_buffer(bufnr)
   if util.is_filetype_allowed(vim.bo[bufnr].filetype, config.get().filetypes) then
     map_buffer(bufnr)
+    canonicalize_keys(bufnr)
     render.render(bufnr)
   end
 end
@@ -425,20 +428,50 @@ function M.reanchor()
   end)
 end
 
--- Maps the relative paths of an unattached sidecar onto this root.
-local function rebase(entry, root)
-  local map
-  if entry.keep_paths then
-    -- The project moved wholesale, or its files are already sitting here under
-    -- these very paths. Either way the paths inside it are unchanged.
-    map = function(relative)
-      return relative
+local function has_repository(path)
+  return vim.fs.root(path, { ".git" }) ~= nil
+end
+
+-- Which notes of an unattached sidecar belong to this root, and under which key.
+--
+-- Decided per note, from where its file actually is. Judging a whole sidecar by
+-- the shape of its root path, or by some file name also existing here, offered
+-- live unrelated projects for adoption (every project has a README.md) and
+-- copied their notes onto this project's files.
+local function adoption_plan(entry, root)
+  local recorded = entry.root
+  -- The previous version keyed a tree without .git on the working directory and
+  -- stored a file outside it under its bare name. Such a key can only be matched
+  -- by name, so that is allowed only for a sidecar that could have been written
+  -- that way, and only when the name does not already exist where it was keyed.
+  local by_name = not entry.missing and not has_repository(recorded)
+  local prefix = root == "/" and "/" or (root .. "/")
+
+  local cache = {}
+  local function map(relative)
+    if type(relative) ~= "string" or relative == "" then
+      return nil
     end
-  else
-    -- The root itself is derived differently now; the files stayed put.
-    map = function(relative)
-      return util.relative_path(util.absolute_path(entry.root, relative), root)
+    if cache[relative] ~= nil then
+      return cache[relative] or nil
     end
+    local mapped = false
+    local here = util.absolute_path(root, relative)
+    if entry.missing then
+      -- The project moved away wholesale. Its paths still hold, but only for
+      -- files that exist here.
+      mapped = vim.uv.fs_stat(here) and relative or false
+    else
+      local there = util.absolute_path(recorded, relative)
+      if there:sub(1, #prefix) == prefix and util.project_root(there) == root then
+        -- The root is derived differently now; the file stayed put.
+        mapped = util.relative_path(there, root) or false
+      elseif by_name and not vim.uv.fs_stat(there) and vim.uv.fs_stat(here) then
+        mapped = relative
+      end
+    end
+    cache[relative] = mapped
+    return mapped or nil
   end
 
   local comments, skipped = {}, 0
@@ -463,6 +496,20 @@ local function rebase(entry, root)
   return comments, skipped, files
 end
 
+-- Unattached sidecars holding at least one note that belongs to this root.
+function M.adoption_candidates(root)
+  local result = {}
+  for _, entry in ipairs(store.adoptable(root)) do
+    local comments, skipped, files = adoption_plan(entry, root)
+    if #comments > 0 then
+      entry.comments, entry.skipped, entry.files = comments, skipped, files
+      entry.count = #comments
+      result[#result + 1] = entry
+    end
+  end
+  return result
+end
+
 function M.adopt()
   local _, _, root = current_context()
   if not root then
@@ -473,7 +520,7 @@ function M.adopt()
     return
   end
 
-  local candidates = store.adoptable(root)
+  local candidates = M.adoption_candidates(root)
   if #candidates == 0 then
     vim.notify("contextmark: no unattached sidecars for this project", vim.log.levels.INFO)
     return
@@ -492,14 +539,7 @@ function M.adopt()
     if not entry then
       return
     end
-    local comments, skipped, files = rebase(entry, root)
-    if #comments == 0 then
-      vim.notify(
-        ("contextmark: none of the %d note(s) map inside this root"):format(entry.count),
-        vim.log.levels.WARN
-      )
-      return
-    end
+    local comments, skipped, files = entry.comments, entry.skipped, entry.files
     local ok, added, error_message = store.import(root, comments, files)
     notify_save(ok, error_message)
     if not ok then
@@ -588,6 +628,52 @@ local function settle_rename(bufnr)
   end
 end
 
+-- Keys written before a symlinked file was resolved to its target. The previous
+-- version stored "alias.md" for a link to "real.md" in the same project; this
+-- version keys the buffer as "real.md", so those notes were stored but shown
+-- nowhere, and no command could reach them (Move and Relocate both resolve the
+-- old key to the new one and see nothing to do). Checked once per root.
+local canonicalized = {}
+
+function canonicalize_keys(bufnr)
+  local _, root = util.buffer_context(bufnr)
+  if not root or canonicalized[root] then
+    return
+  end
+  canonicalized[root] = true
+
+  local renames, order = {}, {}
+  for _, comment in ipairs(store.list(root)) do
+    local file = comment.file
+    if type(file) == "string" and file ~= "" and renames[file] == nil then
+      -- Joined literally: resolving here is exactly what hides the old key.
+      local literal = (root == "/" and "" or root) .. "/" .. file
+      local current = vim.uv.fs_stat(literal) and util.relative_path(literal, root)
+      if current and current ~= file then
+        renames[file] = current
+        order[#order + 1] = file
+      else
+        renames[file] = false
+      end
+    end
+  end
+
+  local moved = 0
+  for _, file in ipairs(order) do
+    local ok, count, error_message = store.rekey(root, file, renames[file])
+    notify_save(ok, error_message)
+    if ok then
+      moved = moved + count
+    end
+  end
+  if moved > 0 then
+    vim.notify(
+      ("contextmark: re-keyed %d note(s) recorded under a symlinked path"):format(moved),
+      vim.log.levels.INFO
+    )
+  end
+end
+
 -- Announced once per root per session, and only when this project has no notes
 -- of its own: a silent empty sidecar is indistinguishable from "no notes yet".
 local announced = {}
@@ -601,14 +687,14 @@ local function announce_adoptable(bufnr)
   if #store.list(root) > 0 then
     return
   end
-  local candidates = store.adoptable(root)
-  local total = 0
+  local candidates = M.adoption_candidates(root)
+  local total, sidecars = 0, 0
   for _, entry in ipairs(candidates) do
-    -- A project that merely vanished somewhere else is not this project's
-    -- business. Only mention sidecars whose files are here, or whose root sits
-    -- on this branch of the tree.
-    if entry.overlaps or entry.related then
+    -- A project that merely vanished somewhere else is not announced: its notes
+    -- can only be matched here by path, which is too weak to warn about unasked.
+    if not entry.missing then
       total = total + entry.count
+      sidecars = sidecars + 1
     end
   end
   if total == 0 then
@@ -617,7 +703,7 @@ local function announce_adoptable(bufnr)
   vim.notify(
     ("contextmark: %d note(s) in %d sidecar(s) are not attached to this project root."):format(
       total,
-      #candidates
+      sidecars
     ) .. " Run :ContextMarkAdopt to review them.",
     vim.log.levels.WARN
   )
@@ -819,6 +905,7 @@ function M.setup(opts)
     callback = function(event)
       if util.is_filetype_allowed(vim.bo[event.buf].filetype, config.get().filetypes) then
         settle_rename(event.buf)
+        canonicalize_keys(event.buf)
         render.render(event.buf)
         announce_adoptable(event.buf)
       end
