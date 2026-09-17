@@ -198,6 +198,12 @@ MUTATIONS = [
         "  if false then",
     ),
     (
+        "unopenable sidecar read as absent",
+        "lua/contextmark/store.lua",
+        "    if vim.uv.fs_stat(path) then\n      return nil, (\"unreadable: %s\")",
+        "    if false then\n      return nil, (\"unreadable: %s\")",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",

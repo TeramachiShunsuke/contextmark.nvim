@@ -33,8 +33,13 @@ end
 -- those must never be treated the same. Reading a truncated sidecar as an empty
 -- project made the next save replace every note in it with nothing.
 local function read_state_file(path)
-  local file = io.open(path, "r")
+  local file, open_error = io.open(path, "r")
   if not file then
+    -- Only a missing file is an empty project. One that exists but cannot be
+    -- opened (permissions, I/O error) still holds notes we must not replace.
+    if vim.uv.fs_stat(path) then
+      return nil, ("unreadable: %s"):format(open_error or "cannot open")
+    end
     return nil, "absent"
   end
   local raw = file:read("*a")

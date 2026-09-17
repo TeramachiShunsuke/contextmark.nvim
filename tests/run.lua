@@ -1500,13 +1500,36 @@ test("refuses to move a file onto itself", function()
 
   -- A typo like this used to drop the file's identity, and the next render then
   -- adopted the replacement as the note's own file with no warning left.
-  plugin.move("docs/a.md", "docs/a.md")
+  local messages = {}
+  local original_notify = vim.notify
+  vim.notify = function(message)
+    messages[#messages + 1] = message
+  end
+  local ok, failure = pcall(plugin.move, "docs/a.md", "docs/a.md")
+  vim.notify = original_notify
+  if not ok then
+    error(failure, 0)
+  end
   render.render(bufnr)
   local after = store.list(root, "docs/a.md")[1].anchor.status
   vim.cmd.enew({ bang = true })
 
   equal(flagged, "mismatch")
   equal(after, "mismatch")
+  -- The command must refuse on its own, not report "moved 0 note(s)".
+  equal(messages, { "contextmark: the source and destination are the same file" })
+end)
+
+test("rekeying a file onto itself keeps its identity", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+
+  -- store.rekey() guards this itself, independent of the :ContextMarkMove check.
+  local ok, moved = store.rekey(root, "docs/a.md", "docs/a.md")
+
+  equal(ok, true)
+  equal(moved, 0)
+  assert(store.fingerprint(root, "docs/a.md"), "the file's identity was dropped")
 end)
 
 test("keeps the destination's own identity when moving notes onto it", function()
@@ -1667,6 +1690,26 @@ test("refuses to overwrite a sidecar it cannot read", function()
   local future_saved, future_reason = store.save(root)
   equal(future_saved, false)
   assert(future_reason and future_reason:find("newer version", 1, true), future_reason)
+end)
+
+test("refuses to overwrite a sidecar it has no permission to read", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at, "precious")
+  local path = store.path(root)
+  local intact = table.concat(vim.fn.readfile(path), "\n")
+
+  -- A file that exists but cannot be opened used to read as an empty project,
+  -- and the next save replaced every note in it.
+  assert(vim.uv.fs_chmod(path, tonumber("000", 8)))
+  store.reset_cache()
+  local listed = #store.list(root)
+  local saved, reason = store.save(root)
+  assert(vim.uv.fs_chmod(path, tonumber("644", 8)))
+
+  equal(listed, 0)
+  equal(saved, false)
+  assert(reason and reason:find("unreadable", 1, true), reason)
+  equal(table.concat(vim.fn.readfile(path), "\n"), intact)
 end)
 
 test("survives a note whose anchor is damaged", function()
