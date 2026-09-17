@@ -2671,6 +2671,42 @@ test("an edit saved late does not undo a move made meanwhile", function()
   equal(on_b[1].updated_at, "later")
 end)
 
+test("does not remove a fresh lock taken while a stale one was being cleared", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({}, lock)
+  local stale = os.time() - 60
+  vim.uv.fs_utime(lock, stale, stale)
+
+  -- Two instances find the same stale lock. The other one clears it and takes
+  -- a fresh lock between our stat and our unlink, which used to remove the
+  -- other instance's lock and let both of them write.
+  local original_stat = vim.uv.fs_stat
+  local theirs
+  vim.uv.fs_stat = function(path, ...)
+    local info = original_stat(path, ...)
+    if path == lock and not theirs then
+      vim.uv.fs_unlink(lock)
+      local handle = assert(vim.uv.fs_open(lock, "wx", 384))
+      vim.uv.fs_close(handle)
+      theirs = original_stat(lock).ino
+    end
+    return info
+  end
+  local ok, saved = pcall(store.save, root)
+  vim.uv.fs_stat = original_stat
+  local survivor = vim.uv.fs_stat(lock)
+  vim.uv.fs_unlink(lock)
+  if not ok then
+    error(saved, 0)
+  end
+
+  equal(saved, false)
+  assert(survivor, "the other instance's lock was removed")
+  equal(survivor.ino, theirs)
+end)
+
 test("expands only a leading ~ in :ContextMarkMove paths", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   local plugin = require("contextmark")

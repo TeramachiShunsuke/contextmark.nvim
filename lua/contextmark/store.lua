@@ -361,8 +361,21 @@ local function acquire_lock(path)
     end
     local info = vim.uv.fs_stat(lock)
     if info and os.time() - info.mtime.sec > lock_stale_seconds then
-      -- Left behind by an instance that died before releasing it.
-      vim.uv.fs_unlink(lock)
+      -- Left behind by an instance that died before releasing it. Another
+      -- waiter may have cleared it and taken a fresh lock since our stat, so
+      -- move it aside first and only discard it if it is the one we judged
+      -- stale; unlinking by name would remove that waiter's live lock.
+      local aside = ("%s.stale-%s"):format(lock, tostring(vim.uv.hrtime()))
+      if vim.uv.fs_rename(lock, aside) then
+        local moved = vim.uv.fs_stat(aside)
+        if moved and moved.ino ~= info.ino then
+          -- Not the stale lock: hand it back. link() refuses to replace a lock
+          -- that appeared in the meantime.
+          vim.uv.fs_link(aside, lock)
+          vim.uv.sleep(lock_wait_ms)
+        end
+        vim.uv.fs_unlink(aside)
+      end
     else
       vim.uv.sleep(lock_wait_ms)
     end
