@@ -2281,6 +2281,56 @@ test("re-keys a note recorded under a symlinked file in the same project", funct
   equal(#extmarks, 1)
 end)
 
+test("retries a failed re-key and reports the failure once", function()
+  local root, store = fixture({ ["docs/real.md"] = document("Alpha") })
+  assert(vim.uv.fs_symlink(root .. "/docs/real.md", root .. "/docs/alias.md"))
+  local util = require("contextmark.util")
+  local now = util.now()
+  equal(
+    store.add(root, {
+      id = "cm-alias-retry",
+      file = "docs/alias.md",
+      filetype = "markdown",
+      body = "written through the link",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(document("Alpha"), marked_at, marked_at, 2),
+    }),
+    true
+  )
+
+  local original_rekey, original_notify = store.rekey, vim.notify
+  local errors = 0
+  store.rekey = function()
+    return false, 0, "sidecar is locked by another Neovim instance"
+  end
+  vim.notify = function(message, level)
+    if level == vim.log.levels.ERROR and message:find("could not save", 1, true) then
+      errors = errors + 1
+    end
+  end
+  local ok, failure = pcall(function()
+    vim.cmd.edit(root .. "/docs/real.md")
+    vim.cmd.doautocmd("BufEnter")
+    vim.cmd.doautocmd("BufEnter")
+  end)
+  store.rekey, vim.notify = original_rekey, original_notify
+  if not ok then
+    vim.cmd.enew({ bang = true })
+    error(failure, 0)
+  end
+  local while_locked = #store.list(root, "docs/real.md")
+
+  -- Once the lock is gone, the next BufEnter must finish the job.
+  vim.cmd.doautocmd("BufEnter")
+  local after = #store.list(root, "docs/real.md")
+  vim.cmd.enew({ bang = true })
+
+  equal(errors, 1)
+  equal(while_locked, 0)
+  equal(after, 1)
+end)
+
 test("does not offer a live project's notes because a file name also exists here", function()
   local root, store, util = fixture({ ["README.md"] = document("Mine") })
   local other = util.normalize(vim.fn.tempname())

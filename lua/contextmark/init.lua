@@ -635,14 +635,17 @@ end
 -- version keys the buffer as "real.md", so those notes were stored but shown
 -- nowhere, and no command could reach them (Move and Relocate both resolve the
 -- old key to the new one and see nothing to do). Checked once per root.
+-- Marked done only once every re-key has been saved, so a transient failure
+-- (another instance holding the lock) is retried on the next BufEnter. The
+-- error is reported once per root, or it would repeat on every buffer switch.
 local canonicalized = {}
+local canonicalize_reported = {}
 
 function canonicalize_keys(bufnr)
   local _, root = util.buffer_context(bufnr)
   if not root or canonicalized[root] then
     return
   end
-  canonicalized[root] = true
 
   local renames, order = {}, {}
   for _, comment in ipairs(store.list(root)) do
@@ -660,13 +663,23 @@ function canonicalize_keys(bufnr)
     end
   end
 
-  local moved = 0
+  local moved, failure = 0, nil
   for _, file in ipairs(order) do
     local ok, count, error_message = store.rekey(root, file, renames[file])
-    notify_save(ok, error_message)
     if ok then
       moved = moved + count
+    else
+      failure = failure or error_message
     end
+  end
+  if failure then
+    if not canonicalize_reported[root] then
+      canonicalize_reported[root] = true
+      notify_save(false, failure)
+    end
+  else
+    canonicalized[root] = true
+    canonicalize_reported[root] = nil
   end
   if moved > 0 then
     vim.notify(

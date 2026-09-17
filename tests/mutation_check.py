@@ -229,6 +229,18 @@ MUTATIONS = [
         "  if false then\n    return nil, \"unreadable: no comments list\"\n  end\n  decoded.comments = type(decoded.comments) == \"table\" and decoded.comments or {}",
     ),
     (
+        "failed re-key marked done",
+        "lua/contextmark/init.lua",
+        "  else\n    canonicalized[root] = true\n    canonicalize_reported[root] = nil\n  end",
+        "  end\n  canonicalized[root] = true\n  do\n    canonicalize_reported[root] = nil\n  end",
+    ),
+    (
+        "failed re-key reported on every BufEnter",
+        "lua/contextmark/init.lua",
+        "    if not canonicalize_reported[root] then",
+        "    if true then",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",
