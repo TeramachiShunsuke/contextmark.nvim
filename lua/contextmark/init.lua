@@ -459,8 +459,10 @@ local function adoption_plan(entry, root)
     local here = util.absolute_path(root, relative)
     if entry.missing then
       -- The project moved away wholesale. Its paths still hold, but only for
-      -- files that exist here.
-      mapped = vim.uv.fs_stat(here) and relative or false
+      -- files that exist here, and only while they stay inside this root: a
+      -- key like "../x" would otherwise let prompts read outside the project.
+      mapped = vim.uv.fs_stat(here) and util.relative_path(here, root) == relative and relative
+        or false
     else
       local there = util.absolute_path(recorded, relative)
       if there:sub(1, #prefix) == prefix and util.project_root(there) == root then

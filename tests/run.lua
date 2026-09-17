@@ -1115,6 +1115,53 @@ test("adopts notes from a sidecar whose project root moved", function()
   equal(vim.fn.filereadable(candidates[1].path), 1)
 end)
 
+test("does not adopt a note whose path escapes the project root", function()
+  local root, store, util = fixture({ ["docs/a.md"] = { "hello", "world" } })
+  local plugin = require("contextmark")
+  local now = util.now()
+  -- A file right next to the root, which "../" from inside it would reach.
+  local outside = vim.fs.basename(root) .. "-outside.md"
+  vim.fn.writefile({ "secret" }, vim.fs.dirname(root) .. "/" .. outside)
+  local gone = vim.fn.tempname() .. "/moved-away"
+  local function note(id, file)
+    return {
+      id = id,
+      file = file,
+      filetype = "markdown",
+      body = id,
+      created_at = now,
+      updated_at = now,
+      anchor = { kind = "line", start_line = 1, end_line = 1, excerpt = { "hello" } },
+    }
+  end
+  equal(store.add(gone, note("cm-inside", "docs/a.md")), true)
+  equal(store.add(gone, note("cm-escape", "../" .. outside)), true)
+
+  local candidates = plugin.adoption_candidates(root)
+
+  equal(#candidates, 1)
+  equal(candidates[1].count, 1)
+  equal(candidates[1].skipped, 1)
+  equal(candidates[1].comments[1].file, "docs/a.md")
+end)
+
+test("adoption skips a note that has no id instead of failing", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  local ok, added = store.import(root, {
+    { file = "docs/a.md", body = "no id", anchor = { start_line = 1, end_line = 1 } },
+    {
+      id = "cm-good",
+      file = "docs/a.md",
+      body = "good",
+      anchor = { start_line = 1, end_line = 1 },
+    },
+  }, {})
+
+  equal(ok, true)
+  equal(added, 1)
+  equal(#store.list(root, "docs/a.md"), 1)
+end)
+
 test("leaves a live unrelated project's sidecar alone", function()
   local root, store = fixture({ ["docs/a.md"] = { "hello" } })
   local util = require("contextmark.util")
@@ -1853,6 +1900,44 @@ test("never names a line the file does not have", function()
   assert(not healthy:find("Lines 38", 1, true), "the prompt named a line past the end of the file")
   assert(not flagged:find("Lines 38", 1, true), "the flagged prompt named a line past the end")
   assert(healthy:find("> the noted sentence", 1, true), "the stored excerpt was dropped")
+end)
+
+test("names line 1 for a note on a file that is now empty", function()
+  local util = require("contextmark.util")
+  local original_reader = util.read_buffer_or_file
+  local function build(contents)
+    util.read_buffer_or_file = function()
+      return contents
+    end
+    local ok, text = pcall(prompt.build, "/project", {
+      {
+        file = "note.md",
+        filetype = "markdown",
+        body = "keep this",
+        anchor = {
+          start_line = 38,
+          end_line = 39,
+          excerpt = { "the noted sentence" },
+          status = "orphaned",
+        },
+      },
+    })
+    util.read_buffer_or_file = original_reader
+    if not ok then
+      error(text, 0)
+    end
+    return text
+  end
+
+  -- Readable but empty: the same 1-1 that anchor.resolve() gives an empty file.
+  local empty = build({})
+  -- Unreadable: nothing to clamp against, so the stored range is all we know.
+  local unreadable = build(nil)
+
+  assert(empty:find("Line 1\n", 1, true), empty)
+  assert(not empty:find("Lines 38", 1, true), "the prompt named a line an empty file lacks")
+  assert(empty:find("> the noted sentence", 1, true), "the stored excerpt was dropped")
+  assert(unreadable:find("Lines 38-39", 1, true), unreadable)
 end)
 
 test("reports a sidecar write that fails part way", function()

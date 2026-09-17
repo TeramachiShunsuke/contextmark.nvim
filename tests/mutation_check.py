@@ -204,6 +204,24 @@ MUTATIONS = [
         "    if false then\n      return nil, (\"unreadable: %s\")",
     ),
     (
+        "moved-project adoption allows escaping keys",
+        "lua/contextmark/init.lua",
+        "util.relative_path(here, root) == relative and relative",
+        "relative",
+    ),
+    (
+        "import indexes a missing id",
+        "lua/contextmark/store.lua",
+        "the source sidecar keeps it.\n    if comment.id ~= nil and not known[comment.id] then",
+        "the source sidecar keeps it.\n    if not known[comment.id] then",
+    ),
+    (
+        "prompt keeps stored lines for an empty file",
+        "lua/contextmark/prompt.lua",
+        "  if #lines == 0 then\n    return 1, 1\n  end",
+        "  if #lines == 0 then\n    return start_line, end_line\n  end",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",

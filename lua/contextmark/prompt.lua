@@ -16,8 +16,12 @@ end
 -- and an agent that trusts the coordinates over the quote would then read
 -- nothing, or the wrong place.
 local function within(lines, start_line, end_line)
-  if not lines or #lines == 0 then
+  -- Unreadable: nothing to clamp against. Empty: 1-1, as anchor.resolve() gives.
+  if not lines then
     return start_line, end_line
+  end
+  if #lines == 0 then
+    return 1, 1
   end
   local first = math.max(1, math.min(start_line, #lines))
   return first, math.max(first, math.min(end_line, #lines))

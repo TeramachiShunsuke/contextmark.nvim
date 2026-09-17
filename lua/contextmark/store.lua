@@ -567,14 +567,13 @@ end
 -- rebasing `file` onto this root first; store does not do path arithmetic.
 function M.import(root, comments, files)
   local state = load(root)
-  local known = {}
-  for _, comment in ipairs(state.comments) do
-    known[comment.id] = true
-  end
+  local known = by_id(state.comments)
 
   local added = 0
   for _, comment in ipairs(drop_removed(root, comments or {})) do
-    if not known[comment.id] then
+    -- A note without an id cannot be edited, deleted or deduplicated. Skip it
+    -- rather than abort the whole adoption; the source sidecar keeps it.
+    if comment.id ~= nil and not known[comment.id] then
       state.comments[#state.comments + 1] = comment
       known[comment.id] = true
       added = added + 1
