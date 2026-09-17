@@ -2611,6 +2611,45 @@ test("keys a file whose name contains $VAR literally", function()
   equal(vim.fn.filereadable(util.absolute_path(root, name)), 1)
 end)
 
+test("moves and adopts notes on a symlink that points outside the project", function()
+  local root, store, util = fixture({ ["notes/todo.md"] = document("Alpha") })
+  local plugin = require("contextmark")
+  local outside = util.normalize(vim.fn.tempname())
+  vim.fn.mkdir(outside, "p")
+  vim.fn.writefile(document("Linked"), outside .. "/x.md")
+  assert(vim.uv.fs_symlink(outside .. "/x.md", root .. "/notes/alias.md"))
+
+  -- The link is keyed inside the project, as "notes/alias.md".
+  add_note(root, "notes/alias.md", marked_at, marked_at, "on the link")
+  vim.cmd.edit(root .. "/notes/todo.md")
+  plugin.move("notes/alias.md", "notes/renamed.md")
+  local moved = #store.list(root, "notes/renamed.md")
+
+  -- A project that moved away wholesale, with a note on the same link key.
+  local gone = vim.fn.tempname() .. "/moved-away"
+  local now = util.now()
+  equal(
+    store.add(gone, {
+      id = "cm-link-adopt",
+      file = "notes/alias.md",
+      filetype = "markdown",
+      body = "adopt me",
+      created_at = now,
+      updated_at = now,
+      anchor = { kind = "line", start_line = 1, end_line = 1, excerpt = { "# Linked" } },
+    }),
+    true
+  )
+  local candidates = plugin.adoption_candidates(root)
+  vim.cmd.enew({ bang = true })
+
+  -- Both used to resolve the key through the link to a path outside the root
+  -- and give up with "both paths must be inside".
+  equal(moved, 1)
+  equal(#candidates, 1)
+  equal(candidates[1].comments[1].file, "notes/alias.md")
+end)
+
 test("expands only a leading ~ in :ContextMarkMove paths", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   local plugin = require("contextmark")

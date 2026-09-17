@@ -175,6 +175,14 @@ function M.absolute_path(root, relative)
   return normalize(join(without_trailing_slash(fs_normalize(root)), relative))
 end
 
+-- The key joined onto the root as written, without resolving symlinks. Use it
+-- to decide whether a key belongs to the root: absolute_path() follows a link
+-- that points outside the project, so relative_path() of its result is nil
+-- even though the key itself is inside.
+function M.literal_absolute_path(root, relative)
+  return literal_path(join(without_trailing_slash(fs_normalize(root)), relative))
+end
+
 -- The single gate every note-owning code path goes through. Returns nil when the
 -- buffer must not own notes: a scratch/terminal/help buffer, a scheme-prefixed
 -- name (fugitive://, oil://), or a file that does not sit inside its own root.
