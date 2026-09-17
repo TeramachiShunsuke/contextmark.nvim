@@ -84,6 +84,11 @@ local function match_at(lines, excerpt, start_line, start_col)
   return end_line, #excerpt[#excerpt]
 end
 
+-- Ranks a candidate position. This score cannot tell "moved" from "wrong file":
+-- an empty prefix and suffix both match trivially and are worth four points, and
+-- the blank lines that surround most Markdown paragraphs match anywhere, so a
+-- candidate in a completely unrelated file never scores zero. Deciding whether
+-- the file itself is still the right one belongs to identity.lua.
 local function context_score(lines, stored, start_line, end_line, start_col, end_col)
   local score = 0
   local before = stored.before or {}
@@ -107,6 +112,10 @@ local function context_score(lines, stored, start_line, end_line, start_col, end
     score = score + 2
   end
   return score
+end
+
+local function is_effectively_empty(lines)
+  return #lines == 0 or (#lines == 1 and lines[1] == "")
 end
 
 local function candidates(lines, excerpt)
@@ -152,8 +161,11 @@ local function candidates(lines, excerpt)
 end
 
 function M.resolve(lines, stored)
-  if #lines == 0 then
-    return nil, nil, "orphaned", nil, nil
+  -- Report an empty file as a resolvable position rather than nil. Returning nil
+  -- made render.lua drop the note entirely, so "orphaned" was unreachable and
+  -- the note silently vanished instead of being flagged.
+  if is_effectively_empty(lines) then
+    return 1, 1, "orphaned", 0, 0
   end
 
   local excerpt = stored.excerpt or {}

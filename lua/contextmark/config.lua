@@ -26,6 +26,7 @@ local defaults = {
   display = {
     sign = "N",
     stale_sign = "?",
+    mismatch_sign = "!",
     max_virtual_text = 60,
     hover = true,
     hover_max_width = 88,
