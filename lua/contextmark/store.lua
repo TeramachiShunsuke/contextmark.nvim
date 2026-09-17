@@ -222,7 +222,11 @@ local function legacy_state_paths(root)
       local state = read_state_file(path)
       local recorded = state and state.root
       local resolved = type(recorded) == "string" and vim.uv.fs_realpath(recorded)
-      if resolved and resolved ~= recorded and vim.fs.normalize(resolved) == root then
+      if
+        resolved
+        and resolved ~= recorded
+        and vim.fs.normalize(resolved, { expand_env = false }) == root
+      then
         result[#result + 1] = { path = path, state = state }
       end
     end

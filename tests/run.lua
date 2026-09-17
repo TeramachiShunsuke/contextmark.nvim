@@ -2599,6 +2599,40 @@ test("keeps a mismatched note's line past the end of a shorter replacement", fun
   equal(comment.anchor.start_line, noted_at)
 end)
 
+test("keys a file whose name contains $VAR literally", function()
+  local name = "docs/cost$HOME.md"
+  local root, _, util = fixture({ [name] = document("Alpha") })
+  local path = root .. "/" .. name
+
+  -- vim.fs.normalize() expands environment variables by default, which turned
+  -- this key into "docs/cost/Users/<user>.md": no buffer or file matched it.
+  equal(util.relative_path(path, root), name)
+  equal(util.absolute_path(root, name), path)
+  equal(vim.fn.filereadable(util.absolute_path(root, name)), 1)
+end)
+
+test("expands only a leading ~ in :ContextMarkMove paths", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  local plugin = require("contextmark")
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  vim.cmd.edit(root .. "/docs/a.md")
+
+  local original_home = vim.env.HOME
+  vim.env.HOME = vim.fs.dirname(root)
+  local ok, failure = pcall(function()
+    plugin.move("~/" .. vim.fs.basename(root) .. "/docs/a.md", "docs/cost$HOME.md")
+    plugin.move("docs/cost$HOME.md", "docs/#tag{x,y}.md")
+  end)
+  vim.env.HOME = original_home
+  local moved = #store.list(root, "docs/#tag{x,y}.md")
+  vim.cmd.enew({ bang = true })
+  if not ok then
+    error(failure, 0)
+  end
+
+  equal(moved, 1)
+end)
+
 local failures = 0
 for _, item in ipairs(tests) do
   local ok, error_message = pcall(item.callback)

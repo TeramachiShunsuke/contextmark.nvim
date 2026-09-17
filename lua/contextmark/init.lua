@@ -128,7 +128,12 @@ local function as_relative(root, value)
   if not value or value == "" then
     return nil
   end
-  local expanded = vim.fn.expand(value)
+  -- Only a leading "~" is expanded. vim.fn.expand() also rewrote "$VAR", "#",
+  -- "<cword>" and "{x,y}", all of which can appear in a real file name.
+  local expanded = value
+  if (value == "~" or value:sub(1, 2) == "~/") and vim.env.HOME then
+    expanded = vim.env.HOME .. value:sub(2)
+  end
   if expanded:sub(1, 1) == "/" then
     return util.relative_path(expanded, root)
   end
