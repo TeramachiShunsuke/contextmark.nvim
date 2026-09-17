@@ -2650,6 +2650,27 @@ test("moves and adopts notes on a symlink that points outside the project", func
   equal(candidates[1].comments[1].file, "notes/alias.md")
 end)
 
+test("an edit saved late does not undo a move made meanwhile", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at, "before")
+
+  -- M.edit() holds the note while the float waits for input. A reload from
+  -- disk replaces the cached tables, so what it holds is a copy.
+  local held = vim.deepcopy(store.list(root, "docs/a.md")[1])
+  local ok = store.rekey(root, "docs/a.md", "docs/b.md")
+  equal(ok, true)
+
+  held.body = "after"
+  held.updated_at = "later"
+  equal(store.update(root, held), true)
+  local on_a, on_b = store.list(root, "docs/a.md"), store.list(root, "docs/b.md")
+
+  equal(#on_a, 0)
+  equal(#on_b, 1)
+  equal(on_b[1].body, "after")
+  equal(on_b[1].updated_at, "later")
+end)
+
 test("expands only a leading ~ in :ContextMarkMove paths", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   local plugin = require("contextmark")

@@ -472,11 +472,16 @@ function M.add(root, comment)
   return M.save(root)
 end
 
+-- Applies an edit of the note's text. Only the body and its timestamp are taken
+-- from `comment`: the caller held it while waiting for input, and a move,
+-- re-anchor or reload in the meantime would otherwise be reverted by its stale
+-- `file` and `anchor`.
 function M.update(root, comment)
   local state = load(root)
-  for index, current in ipairs(state.comments) do
+  for _, current in ipairs(state.comments) do
     if current.id == comment.id then
-      state.comments[index] = comment
+      current.body = comment.body
+      current.updated_at = comment.updated_at
       return M.save(root)
     end
   end
