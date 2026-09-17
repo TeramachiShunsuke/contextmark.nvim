@@ -1847,6 +1847,40 @@ test("adopts a sidecar whose files are already in this project", function()
   equal(adopted[1].body, "written before the upgrade")
 end)
 
+test("does not adopt by name a note whose path escapes the project root", function()
+  local root, store, util = fixture({ ["notes/todo.md"] = document("Alpha") })
+  local plugin = require("contextmark")
+  local now = util.now()
+  -- A file right next to the root, which "../" from inside it would reach.
+  local outside = vim.fs.basename(root) .. "-outside.md"
+  vim.fn.writefile({ "secret" }, vim.fs.dirname(root) .. "/" .. outside)
+
+  -- A live previous root without .git, somewhere "../" reaches nothing, so the
+  -- by-name fallback is the only branch that could accept the key.
+  local previous_root = util.normalize(vim.fn.tempname() .. "/deep/previous")
+  vim.fn.mkdir(previous_root, "p")
+  local function note(id, file)
+    return {
+      id = id,
+      file = file,
+      filetype = "markdown",
+      body = id,
+      created_at = now,
+      updated_at = now,
+      anchor = { kind = "line", start_line = 1, end_line = 1, excerpt = { marked_line } },
+    }
+  end
+  equal(store.add(previous_root, note("cm-by-name-inside", "notes/todo.md")), true)
+  equal(store.add(previous_root, note("cm-by-name-escape", "../" .. outside)), true)
+
+  local candidates = plugin.adoption_candidates(root)
+
+  equal(#candidates, 1)
+  equal(candidates[1].count, 1)
+  equal(candidates[1].skipped, 1)
+  equal(candidates[1].comments[1].file, "notes/todo.md")
+end)
+
 test("does not take an unsaved draft as the file's identity", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   add_note(root, "docs/a.md", marked_at, marked_at)

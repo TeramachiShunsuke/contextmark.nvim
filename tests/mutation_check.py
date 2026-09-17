@@ -241,6 +241,12 @@ MUTATIONS = [
         "    if true then",
     ),
     (
+        "by-name adoption allows escaping keys",
+        "lua/contextmark/init.lua",
+        "        -- Same containment as the moved-project branch: \"../x\" must not match.\n        and util.relative_path(here, root) == relative\n",
+        "",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",

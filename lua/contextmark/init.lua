@@ -468,7 +468,13 @@ local function adoption_plan(entry, root)
       if there:sub(1, #prefix) == prefix and util.project_root(there) == root then
         -- The root is derived differently now; the file stayed put.
         mapped = util.relative_path(there, root) or false
-      elseif by_name and not vim.uv.fs_stat(there) and vim.uv.fs_stat(here) then
+      elseif
+        by_name
+        and not vim.uv.fs_stat(there)
+        and vim.uv.fs_stat(here)
+        -- Same containment as the moved-project branch: "../x" must not match.
+        and util.relative_path(here, root) == relative
+      then
         mapped = relative
       end
     end
