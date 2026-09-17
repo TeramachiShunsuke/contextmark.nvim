@@ -52,9 +52,22 @@ sidecar はプロジェクトごとに1ファイルとする。
         "status": "exact"
       }
     }
-  ]
+  ],
+  "files": {
+    "docs/example.md": {
+      "digest": "<内容全体のハッシュ>",
+      "lines": 120,
+      "significant": 96,
+      "sample": ["<空行を除いた重複しない行のハッシュ最大32件>"]
+    }
+  }
 }
 ```
+
+`files` は Note を持つファイルごとの内容の指紋で、追加専用フィールドのため `version` は
+1 のまま。パスは同一性の名前にすぎず、「そのパスにあるファイルが Note を書いた対象のままか」を
+パスからは判定できないため、これを別に記録する。Note 単位の前後文脈では判定できない
+（空行や定型行は無関係な文書にも一致し、閾値を緩めれば同一ファイルの見出し改名で誤検知する）。
 
 行番号に加えて0-based byte列の `start_col` / `end_col`（end-exclusive）を保存する。
 通常のVisual選択では選択文字列だけを `excerpt` とし、Linewise Visualでは行全体を
@@ -70,6 +83,15 @@ sidecar はプロジェクトごとに1ファイルとする。
 - プロジェクト名が同じでも絶対パス hash で衝突しない
 
 チーム共有は別要件とし、将来 `storage.dir` をプロジェクト配下へ明示設定できる。
+
+ファイル名が root 絶対パスの hash である代償として、プロジェクトを移動・改名すると既存の
+sidecar が参照されなくなる。sidecar 自身が `root` を保持しているので、storage ディレクトリを
+走査すれば孤立した sidecar を特定でき、`:ContextMarkAdopt` で取り込める。削除はしない
+（取り込みは加算のみで、やり直しも手作業の復元もできる）。
+
+プロジェクトルートは `.git` を上方探索し、見つからなければ**ファイル自身のディレクトリ**とする。
+cwd フォールバックは `:cd` で紐付けが変わり、cwd 外のファイルが同名ファイルとキーを共有する
+ため採らない。
 
 ## Prompt delivery
 
@@ -98,10 +120,14 @@ registerを使う。これも失敗した場合だけ、promptを未配信とし
 - resolved/open state と resolved Note の表示切替
 - 選択列を含むアンカー
 - fuzzy matcher（本文そのものが編集された場合）
-- Git rename 検出
 - Snacks picker adapter
 - Agent ごとの公式 delivery adapter
 - Note thread / reply
+
+リネーム検出は Git ではなく内容の指紋で実装した（`identity.lua` / `:ContextMarkRelocate`）。
+未コミットの本文への Note が主要ユースケースなので blob oid が存在しないのが普通であり、
+素の `mv` はステージ前には `R` として現れず、`.git` の無いツリーも対象に含むため。
+`git ls-files` で走査対象を絞る程度の最適化なら将来の候補。
 
 ## 混雑した行の表示
 

@@ -24,7 +24,19 @@ nvim --headless -i NONE -u tests/minimal_init.lua -l tests/run.lua
 # フォーマット
 stylua .
 stylua --check .
+
+# テストが本当に対策を守っているかの確認（対策を1つずつ戻して赤くなるか見る）
+python3 tests/mutation_check.py
 ```
+
+`tests/mutation_check.py` は `$TMPDIR` に使い捨てコピーを作って各対策を1つずつ元に戻し、
+どのテストが捕まえるかを表示する。`SURVIVED` が出たテストは何も守っていない。
+同一性・アンカー・sync ガードを変えたら必ず流す（対策のパターン文字列を直書きしているので、
+整形でずれたら `SKIP` と出る。その場合はパターンを現在のコードに合わせて更新する）。
+単独では生存するのが期待値なのは次の4件で、いずれも同じ防御を2層で持っているか、
+緑の実行では原理的に現れない修正: `rekey same-path guard off` / `move same-path guard off`
+（同じガードの2層）、`deletion tombstones off`（削除は 3-way merge の base 比較でも守られる）、
+`cquit argument bug restored`（テストが赤いときだけ効く）。
 
 テストは `tests/run.lua` 内の `test(name, callback)` を登録順に全件実行する単一ファイル方式で、
 フィルタ機構はない。1件だけ動かしたい場合は末尾のループを一時的に絞る。失敗時は `vim.cmd.cquit`
@@ -39,41 +51,145 @@ CI は `.github/workflows/ci.yml`（Neovim v0.11.0 / stable / nightly + stylua�
 ```
 selection.current()  →  anchor.capture()  →  store（sidecar JSON）
                                                   ↓
-                                            render（extmark 描画）
+                            render（identity.compare で同一性判定 → extmark 描画）
                                                   ↓
                                    prompt.build()  →  delivery.send()  →  adapter / clipboard
 ```
 
-`init.lua` がこれらを束ねる唯一の場所で、各モジュールは互いを直接呼ばない（`render` → `anchor`/`store`
-の依存を除く）。
+`init.lua` がこれらを束ねる唯一の場所で、各モジュールは互いを直接呼ばない（`render` →
+`anchor`/`identity`/`store` の依存を除く）。`util.lua` と `identity.lua` は他モジュールを
+require しない葉。
 
-### 位置情報の二重管理（最重要）
+### ファイルとの紐付け（最重要）
 
-同じ Note の位置が2か所にある。
+Note とファイルの対応は `comment.file`（root 相対パス）の文字列一致だけで決まる
+（`store.lua` の `comment.file == relative_file`）。パスは同一性の**名前**にすぎないので、
+「そのパスにあるファイルが本当にこの Note のファイルか」は別に判定する必要がある。
+
+キーを決める唯一の入口が `util.buffer_context(bufnr)`。ここで弾かれた buffer は Note を
+持てない。**Note の位置やキーを扱う処理は必ずこれを通すこと。**
+
+- `buftype ~= ""` を拒否（`nofile` / `help` など）
+- `oil://` `fugitive://` `term://` のような scheme 付き buffer 名を拒否
+- root 外のパスを拒否（`relative_path` が nil を返す）。**basename へのフォールバックを
+  復活させてはいけない** — 無関係な同名ファイルがキーを共有する
+- パスは `normalize()` で symlink 解決済み。ただし root は未解決パスから `vim.fs.root()` で
+  決める（解決を先にすると repo 外を指す symlink が別プロジェクトの sidecar に入る）
+- `.git` が無ければファイル自身のディレクトリを root にする（cwd 依存を作らない）
+
+### 位置情報の三重管理
+
+同じ Note の位置と同一性が3か所にある。
 
 - **sidecar JSON の `anchor`** — ディスク上の真実。ファイルを開いていないときの位置
 - **buffer の extmark** — buffer が開いている間の真実。編集に追従する
+- **sidecar JSON の `files[relative]`** — ファイル内容の指紋。「このパスのファイルが
+  Note を書いた対象のままか」の判断材料（`identity.lua`）
 
-この2つを橋渡しするのが `render.lua` の2関数:
+橋渡しするのが `render.lua` の2関数:
 
-- `render.render(bufnr)` — ファイル本文から `anchor.resolve()` で位置を再計算し、extmark を張り直す。
-  解決結果が保存値とずれていたら sidecar を更新する
+- `render.render(bufnr)` — `identity.compare()` でファイル同一性を1回判定し、`anchor.resolve()` で
+  位置を再計算して extmark を張り直す。差し替わっていれば status を `mismatch` に上書きし、
+  **指紋は更新しない**（更新すると元ファイルが戻ったときに復帰できなくなる）
 - `render.sync(bufnr)` — extmark の現在位置を読み、`anchor.capture()` し直して sidecar へ書き戻す
+
+buffer に未保存の変更がある間、`render.render` は sidecar から解決し直さず、直前に張った extmark の
+位置をメモリ上でそのまま使う（sidecar には書かない）。解決し直すと、編集に追従していた extmark を
+`BufEnter` のたびに捨てて古い行へ戻してしまい、次の `:w` がそこを recapture する。逆に sidecar へ
+書くと、下書きを `:e!` で捨てたときに Note が下書きの本文を指したまま残る。
 
 **位置を参照する処理は必ず先に `render.sync_all()` を呼ぶこと。** `init.lua` の `comments_for()` と
 `list()` がそうしている。忘れると編集中の buffer の Note が古い行番号で出力される。
 
+### sync の証跡保護（壊してはいけない不変条件）
+
+`render.sync` は `comment.anchor` を丸ごと差し替えるので、無条件に走らせると保存済みの
+`excerpt` / `before` / `after` が現在のファイル本文で上書きされ、`status` も `exact` に戻る。
+誤アタッチした Note がこれを受けると、**元の本文が復元不能に失われたうえ健全に見える**。
+
+そのため次の場合は recapture しない。
+
+1. ファイル同一性が `replaced`（Note の status に依らない。健全に見える Note も守る）。
+   **位置も書き戻さず**、status だけを更新する
+2. extmark の範囲が消滅した（対象行が削除され、抽出結果が空白のみ）。位置だけ追従する
+3. render の時点で既に警告状態（`stale` / `orphaned`）だった。位置だけ追従する
+
+**1 を「status が warning なら」に置き換えてはいけない。** status はヒューリスティックの結果で、
+判定を外した瞬間にガードごと迂回される。
+
+3 が必要なのは、警告状態の Note の extmark は自分の本文ではなく「元の行」というフォールバック
+位置に張られているから。ここを recapture すると、無関係な行が `exact` として保存され、
+`:ContextMarkSend` 1回で `Status:` 行の無い健全な Note として agent に届く。Note を付けた文を
+書き直す中心的な用途は、render の時点では `exact` なので 3 に当たらず、従来どおり追従する
+（未保存の間に `BufEnter` が挟まっても、上の live 位置の扱いで `exact` のまま保たれる）。
+
+位置の代入は `anchor.capture` と同じ規則で clamp する（extmark は buffer 末尾の1行先を返す）。
+
+**`replaced` の間は座標を書き戻さない**（`render.render`）。status は毎回更新するが、座標を
+更新すると prompt が「引用は元ファイル、行番号は別ファイル」という混ざったブロックを出し、
+Note が元々どこにあったかの記録も消える。凍結中の span は保存済み excerpt の行数から復元する
+（extmark の範囲をそのまま使うと、buffer 全体を差し替えた後に1行の excerpt に対して
+`Lines 1-61` のような矛盾した範囲が固定される）。`replaced` の Note の extmark も、別ファイル側の
+一致箇所ではなく保存済みの位置（clamp 済み）に張る。
+
+**識別の基準はディスク上の本文からしか採らない**（`vim.bo[bufnr].modified` を見る）。未保存の
+下書きを基準にすると、下書きを捨てた瞬間に無変更のファイルが自分自身と一致しなくなる。
+指紋が無くかつ既に警告状態の Note がある場合も基準を採らない（どちらのファイルが正しいか
+判断材料が無いため、先に開いた方が正解として固定されてしまう）。
+
 ### アンカー解決の優先順位（`anchor.lua`）
 
-`M.resolve()` は次の順で位置を決め、`status` を返す。
+`M.resolve()` は次の順で位置を決め、`status` を返す。ファイル同一性は見ない（見られない）。
 
 1. 保存された行・列で excerpt が一致 → `exact`
 2. ファイル全体から excerpt を検索し、前後文脈（`before`/`after`）と行内の `prefix`/`suffix` で
    スコア付け、同点タイが無ければ最上位を採用 → `moved`
 3. 決められない → 元の行に留めて `stale`
-4. ファイルが空 → `orphaned`
+4. ファイルが空（`{}` または `{""}`）→ `orphaned`。**非 nil の `start_line` を返すこと** —
+   nil を返すと `render.lua` の `if start_line then` で捨てられ、Note が黙って消える
 
-`stale` / `orphaned` は表示上「警告色」として同じ扱いになる（`render.lua` の `stale` 変数）。
+`mismatch` は `anchor.resolve` からは返らない。`render.lua` が `identity.compare` の結果で
+上書きする。`stale` / `orphaned` / `mismatch` は警告扱いだが、`mismatch` だけ別の sign と
+highlight を持つ（`render.lua` の `severity_of`）。
+
+Note 単位の前後文脈でファイルの差し替えを判定しようとしないこと。空行は無関係な文書でも
+一致し、`## 概要` のような定型行も同じで、閾値を緩めれば同一ファイルの見出し改名で誤検知する。
+判定は `identity.lua` のファイル単位の指紋で行う。
+
+### ファイル同一性（`identity.lua`）
+
+`M.fingerprint(lines)` は全体のハッシュ、行数、空行を除いた**重複しない**行から最大32件の
+サンプル（各行のハッシュ）を返す。`M.compare(stored, lines)` は `same` / `replaced` / `unknown`。
+
+- ハッシュ一致 → `same`（変更なしの最頻ケースを最短で抜ける）
+- サンプルの1割以上が残っている → `same`（編集された同じファイル）
+- 1割未満 → `replaced`
+- サンプルが10件未満 → `unknown`（比率が意味を持たない。短い文書は見出し1行を共有するだけで
+  似てしまうので、告発も保証もしない。`:ContextMarkRelocate` が短いファイル同士を総当たりで
+  移動先候補に出していたのはこれが原因）
+- サンプルが無い（指紋未記録・空行だけのファイル）→ `unknown`。**`replaced` として扱わない**
+
+`unknown` は指紋導入前の Note が必ず通る経路なので、ここで警告してはいけない。
+
+**2つの誤りのコストは対称ではない。** 見逃した差し替えは excerpt が一致しなくなることで後から
+気づけるが、誤検知はユーザーが普通に書き直しているファイルの Note を全部警告色にする。
+だから閾値は保守側（9割以上が入れ替わったときだけ）に置く。同じ理由で:
+
+- 行は前後の空白を無視して比較する（`canonical`）。保存時の行末空白除去や一括インデントは、
+  1文字も内容を変えずに全行を書き換えるため、素の比較では必ず誤検知する
+- サンプルは重複を除く。表やコマンド一覧のような反復構造のファイルは、同じ行の digest で
+  サンプルが埋まり、その1行を含む無関係なファイルと一致してしまう
+- サンプルは位置で等間隔に配る。`floor` した歩幅で先頭から拾うと、有意行 33〜63 の文書
+  （最も普通のサイズ）でサンプルが先頭32行で尽き、導入部の書き直しが `replaced` になり、
+  逆にライセンスヘッダを共有する別文書が `same` になる
+
+テストの fixture は必ず**現実的な長さの文書**にする。4行の fixture は攻撃的な閾値しか固定できず、
+日常編集の誤検知を直そうとすると逆にテストが邪魔をする。さらにサンプルが10件未満だと判定自体が
+`unknown` になり、その分岐を通らない。`tests/run.lua` の `document()` を使う。
+
+判定は buffer 変更（`changedtick`）ごとに1回だけ計算してメモ化する（`render.lua` の
+`file_verdict`）。`:w` は sync と render の両方を走らせ、`BufEnter` でも render が走るので、
+素朴に呼ぶと1回の操作で文書全体を何度もハッシュする。
 
 ### 列はバイトオフセット
 
@@ -88,7 +204,7 @@ Linewise Visual (`V`) と blockwise (`<C-v>`) は `kind = "line"` に落とし�
 ### 保存先
 
 `stdpath("state")/contextmark/<プロジェクト名>-<root の SHA-256 先頭16桁>.json`。
-プロジェクトルートは `vim.fs.root(path, { ".git" })`。
+プロジェクトルートは `vim.fs.root(path, { ".git" })`、見つからなければファイル自身のディレクトリ。
 
 `util.lua` の `normalize()` は `vim.uv.fs_realpath()` でシンボリックリンクを解決する。
 これがないと `/tmp/x` と `/private/tmp/x` が別プロジェクト扱いになり、sidecar が分裂する。
@@ -104,8 +220,65 @@ canonical 側へ保存し、旧ファイルは `.migrated` に rename して残�
 リポジトリ内にファイルを作らないのが設計上の要件（Note 追加で Git diff を出さない）。
 保存先をリポジトリ配下へ移す変更は、この前提を崩すので慎重に。
 
-`store.lua` は root ごとに state をメモリキャッシュする。テストや複数 root をまたぐ処理では
-`store.reset_cache()` が必要。書き込みは temp ファイル + `os.rename` の atomic replace。
+ファイル名が root 文字列のハッシュなので、**root の決め方を変えると既存 Note が全部参照不能になる**。
+sidecar は `state.root` を持っているので、`store.adoptable(root)` が他の sidecar を列挙し、
+`init.lua` の `adoption_plan()` が **Note 単位で**この root に属するかを決め、`:ContextMarkAdopt` が取り込む。
+
+- 記録 root が存在する: `absolute_path(記録 root, file)` がこの root の配下にあり、
+  `project_root()` がこの root を返すものだけ（root の導出が変わっただけで、ファイルは動いていない）
+- 旧バージョンの「`.git` 無しなら cwd、cwd 外は basename」で書かれた可能性がある sidecar
+  （記録 root の上に `.git` が無い）に限り、記録パスにファイルが無く、この root に同名パスが
+  実在する Note を名前で対応づける
+- 記録 root が消えている（プロジェクトごと移動）: この root に同じパスが実在する Note だけ。
+  根拠が弱いので起動時の通知には数えない
+
+sidecar 単位でパスの形（親子関係・同名ファイルの有無）から判定すると、`README.md` を持つ
+無関係な稼働中プロジェクトや、ホーム直下の単独ファイルから見た配下の全プロジェクトが候補になり、
+他プロジェクトの Note をこちらのファイルへ写してしまう。root の導出を変える変更は、この移行経路と
+README の破壊的変更の記述を必ずセットで更新すること。
+
+同じ root の中でファイル自体が symlink だった Note（旧キー `alias.md`、新キー `real.md`）は
+別 sidecar ではないので Adopt では拾えない。`init.lua` の `canonicalize_keys()` が root ごとに
+1回、記録キーを literal に join したパスを `relative_path()` に通し、キーが変わるものを
+`store.rekey` する。
+
+**読めない sidecar は絶対に上書きしない。** `read_state_file` は「無い」と「読めない」を
+区別し、読めないとき（JSON 壊れ・未知 version）は `M.save` が理由付きで失敗を返す。
+ここを区別しないと、切り詰められた sidecar が「空のプロジェクト」として読まれ、次の1回の保存で
+全 Note が消える。`file:write` / `file:close` の戻り値も必ず検査する（ディスク満杯は open では
+なく write で失敗するので、捨てると「成功」と報告しながら中身を壊す）。anchor が壊れた Note は
+捨てずに最小の anchor を与えて残す（本文はユーザーが書いたものなので失わせない）。
+
+`store.lua` は root ごとに state をメモリキャッシュするが、`load()` は sidecar の
+inode + size + mtime を毎回照合し、他の Neovim が書き換えていれば取り込む。取り込みは
+**最後に読み書きした内容（`bases`）を基準にした 3-way merge**（`reconcile()`）で、
+基準から変わった側の変更を残す: 自分が追加・編集した Note は自分のもの、触っていない Note は
+disk のもの、基準にあって disk に無い未編集の Note は他で削除されたものとして落とす。
+「自分の id が勝つ」和集合にすると、他インスタンスの編集を巻き戻し、削除した Note を復活させる。
+**この merge・`save()` 内での再照合・ロックの3つが無いと nvim を2窓開いているだけで片方の Note が
+消える。** `remove()` した id はセッション中 tombstone として記録し、merge で復活させない。
+inode を stamp に含めるのは、書き込みが毎回 rename で新しいファイルを置くため。mtime の粒度が
+1秒のファイルシステムでは、同サイズの書き換えを size + mtime だけでは見逃す。stamp は読む前・
+ロックを外す前に取る（後に取ると、その隙間の書き込みを「読んだ」ことにしてしまう）。
+
+3つ目は `save()` の排他ロック（`<sidecar>.lock` を `fs_open(..., "wx")` で取る）。atomic rename が
+守るのは「読み手が半端なファイルを見ない」ことだけで、2つのインスタンスがそれぞれ
+read → merge → write を走らせると後の rename が先の結果を捨てる。ロックが取れなければ
+**黙って上書きせず失敗を返す**。5秒より古いロックはクラッシュの置き土産として奪う。
+
+`save()` はロック内で stamp を再照合し、disk が読めない状態に変わっていたら（他バージョンの
+書き込み・破損）`unreadable` を立てて拒否する。`load()` 時点の判定だけだと、その後に置き換わった
+sidecar を上書きする。
+
+symlink 経由 root の旧 sidecar を統合したとき、旧ファイルの `.migrated` への rename は
+**その後に最初に成功した保存**で行う（`retiring`）。統合時の保存が失敗したまま残すと、
+そのセッションで削除した Note が次のセッションの統合で復活する。
+
+書き込みは temp ファイル + `os.rename` の atomic replace。テストや複数 root をまたぐ処理では
+`store.reset_cache()` が必要（キャッシュ・stamp・base・tombstone・retiring をまとめて捨てる）。
+
+sidecar のトップレベルは `version` / `root` / `comments` / `files`。`files` は追加専用フィールドで、
+`load()` が未知キーをそのまま往復させるので `version = 1` のままでよい。
 
 ### Prompt 形式は外部契約
 
@@ -128,6 +301,11 @@ User comment: "JSON 文字列化した本文"
 
 Excerpt は保存値ではなく **その時点のファイル本文から再抽出する**（`comment_excerpt()`）。
 読めない場合のみ保存済み excerpt にフォールバックする。
+
+ただし status が warning のときは例外で、**保存済みの excerpt を使い**、範囲ラベルの直後に
+`Status: ...` の1行（`util.status_note()`）を挿入する。誤アタッチした Note を無印で agent に
+渡すと、別ファイルの行を「ユーザーが選んだ範囲」として扱われるため。健全な Note の出力は
+1バイトも変えない（既存の文字列一致テストがそれを固定している）。
 
 ### Delivery（`delivery.lua`）
 
@@ -163,9 +341,29 @@ adapter へは prompt を **原文のまま**渡す。Sidekick の context templ
 実装は遅延 `require` する。highlight / autocmd / buffer-local keymap は
 `require("contextmark").setup()` が張る。コマンドは setup なしでも動くが、描画は走らない。
 
+リネーム追従（`BufFilePre` / `BufFilePost`）も `setup()` が張る autocmd。`:saveas` は2つの
+buffer 分イベントが飛ぶので、記録は必ず `event.buf` でキーを付ける。そして **旧パスがまだ
+存在するなら Note を動かしてはいけない** — `:saveas` と `:file` はコピー・改名であって
+元ファイルは残り、その Note は元ファイルのものだから。LSP のリネームは書き込み後に旧ファイルを
+削除するので、判定は `BufWritePost` と `BufEnter` でも再試行する（`settle_rename`）。
+
+移動先が既に Note か指紋を持っているときは自動で動かさず通知に留める。名前の変更は
+「その buffer が誰の本文を持っているか」を教えてくれないので、2つのファイルの Note を
+黙って混ぜるより放置するほうがまだ良い。
+
+再試行する以上、**リネームの意図には寿命が必要**（`rename_ttl_ns`、60秒）。`:file` が正しく
+何もしなかった記録が残り続けると、数時間後の無関係な削除で「リネームがやっと完了した」と
+誤読して、別ファイルの Note を巻き込んで動かす。あわせて、追従の前に buffer の内容が旧パスの
+指紋と一致することを確認する（`identity.compare ~= "replaced"`）。
+
 ## 変更時の注意
 
 - 新しいモジュールは `init.lua` から呼ぶ。モジュール間の相互 require を増やさない
-- `anchor` / `prompt` / `delivery` を変えたら必ずテストを流す。この3つに既存テストが集中している
+- `anchor` / `identity` / `prompt` / `delivery` を変えたら必ずテストを流す。テストはここに集中している
+- 同一性・アンカー・sync ガードを変えたら `python3 tests/mutation_check.py` も流す。
+  テストが緑でも対策が死んでいることがある
 - sidecar の JSON スキーマを変える場合は `store.lua` の `version = 1` と読み込み時の
-  バージョンチェックを更新する（現在は version 不一致なら空 state として無視する）
+  バージョンチェックを更新する（現在は version 不一致なら空 state として無視する）。
+  追加専用フィールドなら version は据え置ける
+- 判定を足すときは「警告が出る誤検知」と「サイレントな誤アタッチ」を同じ重さで扱わない。
+  後者だけが証跡を失わせる。迷ったら警告側に倒す
