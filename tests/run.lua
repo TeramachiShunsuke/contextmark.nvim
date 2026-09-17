@@ -2683,14 +2683,21 @@ test("does not remove a fresh lock taken while a stale one was being cleared", f
   -- a fresh lock between our stat and our unlink, which used to remove the
   -- other instance's lock and let both of them write.
   local original_stat = vim.uv.fs_stat
-  local theirs
+  local theirs, stale_ino
   vim.uv.fs_stat = function(path, ...)
     local info = original_stat(path, ...)
     if path == lock and not theirs then
+      stale_ino = info.ino
       vim.uv.fs_unlink(lock)
       local handle = assert(vim.uv.fs_open(lock, "wx", 384))
       vim.uv.fs_close(handle)
       theirs = original_stat(lock).ino
+    elseif info and theirs and path:find(lock .. ".stale-", 1, true) == 1 then
+      -- Linux hands the freed inode number straight to the next file, so the
+      -- fresh lock can look like the stale one by inode alone. Reproduce that
+      -- on every platform.
+      info = vim.deepcopy(info)
+      info.ino = stale_ino
     end
     return info
   end

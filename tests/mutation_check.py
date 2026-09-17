@@ -285,8 +285,14 @@ MUTATIONS = [
     (
         "stale lock cleared without checking its inode",
         "lua/contextmark/store.lua",
-        "        if moved and moved.ino ~= info.ino then",
+        "        if moved and not same then",
         "        if false then",
+    ),
+    (
+        "stale lock judged by inode alone",
+        "lua/contextmark/store.lua",
+        "          and moved.mtime.sec == info.mtime.sec\n          and moved.mtime.nsec == info.mtime.nsec\n          and os.time() - moved.mtime.sec > lock_stale_seconds\n",
+        "\n",
     ),
     (
         "deletion tombstones off",

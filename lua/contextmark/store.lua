@@ -368,7 +368,15 @@ local function acquire_lock(path)
       local aside = ("%s.stale-%s"):format(lock, tostring(vim.uv.hrtime()))
       if vim.uv.fs_rename(lock, aside) then
         local moved = vim.uv.fs_stat(aside)
-        if moved and moved.ino ~= info.ino then
+        -- The inode alone is not enough: Linux reuses a freed inode number at
+        -- once, so a fresh lock created right after the stale one was removed
+        -- can carry the same number. A fresh lock is also not stale.
+        local same = moved
+          and moved.ino == info.ino
+          and moved.mtime.sec == info.mtime.sec
+          and moved.mtime.nsec == info.mtime.nsec
+          and os.time() - moved.mtime.sec > lock_stale_seconds
+        if moved and not same then
           -- Not the stale lock: hand it back. link() refuses to replace a lock
           -- that appeared in the meantime.
           vim.uv.fs_link(aside, lock)
