@@ -430,6 +430,11 @@ print("baseline: %d failing, rc=%s" % (len(baseline), code))
 for entry in baseline:
     print("    ! %s" % entry[:160])
 print()
+# Every mutation is judged by whether some test fails. On a red baseline every
+# one of them would read as "caught", so the run proves nothing.
+if baseline or code != 0:
+    print("baseline is not green; fix the suite before checking mutations")
+    sys.exit(1)
 
 # Optional substring filter, so one suspicious mutation can be re-run alone.
 only = sys.argv[1] if len(sys.argv) > 1 else None
