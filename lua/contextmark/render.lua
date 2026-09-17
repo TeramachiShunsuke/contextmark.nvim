@@ -210,6 +210,11 @@ function M.render(bufnr)
     else
       start_line, end_line, status, start_col, end_col = anchor.resolve(lines, comment.anchor)
     end
+    -- A note recorded as healthy that fails to resolve in this render is as much
+    -- a reason to withhold the baseline as one already stored as unresolved.
+    if util.is_warning_status(status) then
+      suspected = true
+    end
     if start_line then
       if replaced then
         -- The text may well resolve -- a replacement file can repeat a template

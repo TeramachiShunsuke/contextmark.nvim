@@ -1619,6 +1619,67 @@ test("refuses to re-anchor against an unsaved buffer", function()
   equal(comment.anchor.excerpt, { marked_line })
 end)
 
+test("refuses to re-anchor when the buffer is edited while the prompt is open", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  local plugin = require("contextmark")
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  vim.fn.writefile(document("Gamma"), root .. "/docs/a.md")
+
+  local render = require("contextmark.render")
+  vim.cmd.edit(root .. "/docs/a.md")
+  local bufnr = vim.api.nvim_get_current_buf()
+  render.render(bufnr)
+  local baseline = store.fingerprint(root, "docs/a.md")
+
+  -- vim.ui.select() may be an asynchronous picker: the buffer can change
+  -- between the unsaved-buffer check and the answer.
+  with_select(function(_, _, on_choice)
+    vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "# half typed" })
+    on_choice("Accept this file")
+  end, plugin.reanchor)
+  local comment = store.list(root, "docs/a.md")[1]
+  local after = store.fingerprint(root, "docs/a.md")
+  vim.cmd.enew({ bang = true })
+
+  equal(comment.anchor.excerpt, { marked_line })
+  equal(comment.previous_anchor, nil)
+  equal(after, baseline)
+end)
+
+test("does not take a baseline when a note without one fails to resolve", function()
+  local root, store, util = fixture({ ["docs/a.md"] = document("Alpha") })
+  local now = util.now()
+  -- A note from before fingerprints existed, recorded as healthy.
+  equal(
+    store.add(root, {
+      id = "cm-no-baseline",
+      file = "docs/a.md",
+      filetype = "markdown",
+      body = "written before fingerprints",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(document("Alpha"), marked_at, marked_at, 2),
+    }),
+    true
+  )
+  -- Opened on a different document that lacks the noted line.
+  local other = document("Gamma")
+  other[marked_at] = "- [ ] something else entirely"
+  vim.fn.writefile(other, root .. "/docs/a.md")
+
+  local render = require("contextmark.render")
+  vim.cmd.edit(root .. "/docs/a.md")
+  render.render(vim.api.nvim_get_current_buf())
+  local status = store.list(root, "docs/a.md")[1].anchor.status
+  local baseline = store.fingerprint(root, "docs/a.md")
+  vim.cmd.enew({ bang = true })
+
+  -- Recording this document would make it the note's file for good, and the
+  -- real one could never be recognised again.
+  assert(util.is_warning_status(status), status)
+  equal(baseline, nil)
+end)
+
 test("keeps reading the sidecar after an edit that found no note", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   add_note(root, "docs/a.md", marked_at, marked_at, "mine")

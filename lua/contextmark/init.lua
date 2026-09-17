@@ -396,6 +396,14 @@ function M.reanchor()
       vim.notify("contextmark: this buffer changed; nothing was re-anchored", vim.log.levels.WARN)
       return
     end
+    -- An asynchronous picker leaves the buffer editable while it is open.
+    if vim.bo[bufnr].modified then
+      vim.notify(
+        "contextmark: save or revert this buffer before re-anchoring against it",
+        vim.log.levels.WARN
+      )
+      return
+    end
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local context_lines = config.get().storage.context_lines
     for _, comment in ipairs(comments) do

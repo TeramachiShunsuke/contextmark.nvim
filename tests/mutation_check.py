@@ -247,6 +247,18 @@ MUTATIONS = [
         "",
     ),
     (
+        "reanchor callback accepts an edited buffer",
+        "lua/contextmark/init.lua",
+        "    -- An asynchronous picker leaves the buffer editable while it is open.\n    if vim.bo[bufnr].modified then",
+        "    -- An asynchronous picker leaves the buffer editable while it is open.\n    if false then",
+    ),
+    (
+        "baseline taken when a note fails to resolve this render",
+        "lua/contextmark/render.lua",
+        "    if util.is_warning_status(status) then\n      suspected = true\n    end",
+        "",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",
@@ -340,13 +352,13 @@ MUTATIONS = [
     (
         "adoption by name off",
         "lua/contextmark/init.lua",
-        "elseif by_name and not vim.uv.fs_stat(there) and vim.uv.fs_stat(here) then",
-        "elseif false then",
+        "      elseif\n        by_name\n        and not vim.uv.fs_stat(there)",
+        "      elseif\n        false\n        and not vim.uv.fs_stat(there)",
     ),
     (
         "moved-project adoption off",
         "lua/contextmark/init.lua",
-        "mapped = vim.uv.fs_stat(here) and relative or false",
+        "mapped = vim.uv.fs_stat(here) and util.relative_path(here, root) == relative and relative\n        or false",
         "mapped = false",
     ),
     (
