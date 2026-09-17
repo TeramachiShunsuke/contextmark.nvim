@@ -39,17 +39,37 @@ local function canonical(line)
   return trimmed
 end
 
--- Distinct canonical lines in document order. Repeats are dropped because a
--- file with a repeating structure (a table, a command list) would otherwise
--- fill the whole sample with one digest and match any other file sharing that
--- single line. Blank lines are dropped for the same reason -- they match
--- anything -- though with distinctness in place they could only ever contribute
--- one entry, so that part is clarity rather than a load-bearing rule.
+-- The digest of a line's canonical form, remembered by the raw line. Hashing
+-- every line of a 50,000-line file took about 110 ms, and it happened again on
+-- the first render after every edit and after every :w, although an edit
+-- changes only a few lines. Cleared when it grows, so it stays bounded.
+local line_digests, line_digest_count = {}, 0
+local line_digest_limit = 200000
+
+local function line_digest(line)
+  local cached = line_digests[line]
+  if cached == nil then
+    if line_digest_count >= line_digest_limit then
+      line_digests, line_digest_count = {}, 0
+    end
+    cached = digest(canonical(line))
+    line_digests[line] = cached
+    line_digest_count = line_digest_count + 1
+  end
+  return cached
+end
+
+-- Digests of the distinct canonical lines, in document order. Repeats are
+-- dropped because a file with a repeating structure (a table, a command list)
+-- would otherwise fill the whole sample with one digest and match any other
+-- file sharing that single line. Blank lines are dropped for the same reason --
+-- they match anything -- though with distinctness in place they could only ever
+-- contribute one entry, so that part is clarity rather than a load-bearing rule.
 local function significant(lines)
   local seen, result = {}, {}
   for _, line in ipairs(lines) do
     if line:match("%S") then
-      local value = canonical(line)
+      local value = line_digest(line)
       if not seen[value] then
         seen[value] = true
         result[#result + 1] = value
@@ -70,17 +90,17 @@ local function sample_of(body)
   local taken = math.min(sample_size, #body)
   local sample = {}
   if taken == 1 then
-    sample[1] = digest(body[1])
+    sample[1] = body[1]
     return sample
   end
   for step = 1, taken do
     local index = 1 + math.floor((step - 1) * (#body - 1) / (taken - 1) + 0.5)
-    sample[#sample + 1] = digest(body[index])
+    sample[#sample + 1] = body[index]
   end
   return sample
 end
 
--- Returns the fingerprint and the canonical lines it was built from, so a
+-- Returns the fingerprint and the line digests it was built from, so a
 -- comparison does not walk the document twice.
 local function describe(lines)
   local body = significant(lines)
@@ -117,7 +137,7 @@ function M.compare(stored, lines)
 
   local present = {}
   for _, value in ipairs(body) do
-    present[digest(value)] = true
+    present[value] = true
   end
   local hits = 0
   for _, entry in ipairs(stored.sample) do
