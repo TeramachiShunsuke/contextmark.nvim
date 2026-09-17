@@ -51,9 +51,14 @@ local function read_state_file(path)
   if decoded.version ~= 1 then
     return nil, "written by a newer version of contextmark"
   end
+  -- Every sidecar this version writes has a comments list, even when empty.
+  -- Without one the file is damaged, not an empty project.
+  if type(decoded.comments) ~= "table" then
+    return nil, "unreadable: no comments list"
+  end
 
   local comments = {}
-  for _, comment in ipairs(type(decoded.comments) == "table" and decoded.comments or {}) do
+  for _, comment in ipairs(decoded.comments) do
     -- A non-table entry carries no note to keep, and would throw in every
     -- comparator and merge that indexes it.
     if type(comment) == "table" then

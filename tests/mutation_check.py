@@ -7,6 +7,7 @@ so this never needs a destructive command.
 import os
 import subprocess
 import sys
+import tempfile
 
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP = os.environ.get("TMPDIR", "/tmp").rstrip("/")
@@ -222,6 +223,12 @@ MUTATIONS = [
         "  if #lines == 0 then\n    return start_line, end_line\n  end",
     ),
     (
+        "sidecar without a comments list read as empty",
+        "lua/contextmark/store.lua",
+        "  if type(decoded.comments) ~= \"table\" then\n    return nil, \"unreadable: no comments list\"\n  end",
+        "  if false then\n    return nil, \"unreadable: no comments list\"\n  end\n  decoded.comments = type(decoded.comments) == \"table\" and decoded.comments or {}",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",
@@ -419,7 +426,9 @@ survived, skipped = [], []
 for index, (name, relative, old, new) in enumerate(MUTATIONS):
     if only and only not in name:
         continue
-    work = "%s/mut-%d-%02d" % (TMP, os.getpid(), index)
+    # A fresh directory every time: copying into a leftover one (a reused PID)
+    # nests lua/ inside lua/ and silently tests the stale copy instead.
+    work = tempfile.mkdtemp(prefix="mut-%02d-" % index, dir=TMP)
     make_copy(work)
     path = os.path.join(work, relative)
     with open(path) as handle:

@@ -1739,6 +1739,26 @@ test("refuses to overwrite a sidecar it cannot read", function()
   assert(future_reason and future_reason:find("newer version", 1, true), future_reason)
 end)
 
+test("refuses to overwrite a sidecar whose comments field is missing", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at, "precious")
+  local path = store.path(root)
+
+  -- Parseable JSON with the right version, but not a shape this version wrote.
+  -- Reading it as an empty project let the next save replace the file.
+  for _, damaged in ipairs({
+    vim.json.encode({ version = 1, root = root }),
+    vim.json.encode({ version = 1, root = root, comments = "precious" }),
+  }) do
+    vim.fn.writefile({ damaged }, path)
+    store.reset_cache()
+    local saved, reason = store.save(root)
+    equal(saved, false)
+    assert(reason and reason:find("unreadable", 1, true), reason)
+    equal(table.concat(vim.fn.readfile(path), "\n"), damaged)
+  end
+end)
+
 test("refuses to overwrite a sidecar it has no permission to read", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   add_note(root, "docs/a.md", marked_at, marked_at, "precious")
