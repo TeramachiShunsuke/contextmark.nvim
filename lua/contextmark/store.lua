@@ -353,11 +353,15 @@ local lock_owner_prefix = "pid:"
 -- instances from each reading, merging and writing, with the later rename
 -- discarding the earlier one's notes.
 local function read_lock_owner(path)
-  local file, open_error = io.open(path, "r")
+  local file = io.open(path, "r")
   if not file then
-    local reason = tostring(open_error or "")
-    return nil,
-      reason:match("ENOENT") or reason:match("No such file") or vim.uv.fs_stat(path) == nil
+    if vim.uv.fs_stat(path) == nil then
+      return nil, true
+    end
+    file = io.open(path, "r")
+    if not file then
+      return nil, vim.uv.fs_stat(path) == nil
+    end
   end
   local first, read_error = file:read("*l")
   local closed, close_error = file:close()
