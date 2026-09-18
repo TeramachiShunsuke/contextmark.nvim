@@ -758,17 +758,15 @@ local function flag_replaced_closed_files(root, comments)
     local relative = comment.file
     if verdicts[relative] == nil then
       local path = util.absolute_path(root, relative)
-      local bufnr = vim.fn.bufnr(path)
-      local open = bufnr >= 0 and vim.api.nvim_buf_is_loaded(bufnr)
-      local stored = store.fingerprint(root, relative)
-      local read, lines = false, nil
-      if not open and stored then
-        -- A file that is gone is not a replacement: Relocate handles that.
-        read, lines = pcall(vim.fn.readfile, path)
-      end
-      verdicts[relative] = read
-        and type(lines) == "table"
-        and identity.compare(stored, lines) == "replaced"
+      -- Strict lookup: vim.fn.bufnr() matches names as patterns, so asking for
+      -- "a.md" could find "a.md.bak" and skip the file that was replaced.
+      local open = util.buffer_for(path) ~= nil
+      local lines = not open
+        and store.fingerprint(root, relative)
+        and util.read_buffer_or_file(path)
+      -- A file that is gone is not a replacement: Relocate handles that.
+      verdicts[relative] = type(lines) == "table"
+        and render.judge(root, relative, lines, store.list(root, relative)) == "replaced"
     end
     if verdicts[relative] and comment.anchor.status ~= "mismatch" then
       comment = vim.deepcopy(comment)

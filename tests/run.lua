@@ -981,6 +981,156 @@ test("flags a note when a template sibling takes its file's place", function()
   equal(baseline.digest, identity.fingerprint(lines).digest)
 end)
 
+-- Puts a note on "## Decision" of an ADR written to docs/adr-001.md, with the
+-- file's identity baseline recorded. Returns the ADR's lines.
+local function adr_note(root, store, lines)
+  local identity = require("contextmark.identity")
+  local util = require("contextmark.util")
+  local decision_at
+  for index, line in ipairs(lines) do
+    if line == "## Decision" then
+      decision_at = index
+    end
+  end
+  local now = util.now()
+  equal(
+    store.add(root, {
+      id = "cm-adr-" .. tostring(vim.uv.hrtime()),
+      file = "docs/adr-001.md",
+      filetype = "markdown",
+      body = "why this decision",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(lines, decision_at, decision_at, 2),
+    }),
+    true
+  )
+  store.set_fingerprint(root, "docs/adr-001.md", identity.fingerprint(lines))
+  equal(store.save(root), true)
+end
+
+test("flags a template sibling in a closed file too", function()
+  local original = adr("PostgreSQL", "We adopt PostgreSQL.")
+  local root, store =
+    fixture({ ["docs/adr-001.md"] = original, ["docs/other.md"] = document("Other") })
+  local plugin = require("contextmark")
+  adr_note(root, store, original)
+
+  -- Replaced while closed, by a sibling sharing only its boilerplate.
+  vim.fn.writefile(adr("OAuth", "We adopt OAuth."), root .. "/docs/adr-001.md")
+  vim.cmd.edit(root .. "/docs/other.md")
+  local text = plugin.build_prompt("all")
+  vim.cmd.enew({ bang = true })
+
+  assert(text:find("Status: different file?", 1, true), text)
+end)
+
+test("does not take a boilerplate line elsewhere for the note's surroundings", function()
+  local original = adr("PostgreSQL", "We adopt PostgreSQL.")
+  local root, store = fixture({ ["docs/adr-001.md"] = original })
+  local render = require("contextmark.render")
+  adr_note(root, store, original)
+
+  -- The sibling happens to mention the old decision, but not beside the note.
+  local sibling = adr("OAuth", "We adopt OAuth.")
+  sibling[#sibling + 1] = "We adopt PostgreSQL."
+  vim.fn.writefile(sibling, root .. "/docs/adr-001.md")
+  vim.cmd.edit(root .. "/docs/adr-001.md")
+  render.render(vim.api.nvim_get_current_buf())
+  local comment = store.list(root, "docs/adr-001.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  equal(comment.anchor.status, "mismatch")
+end)
+
+test("asks the notes when only a paragraph cleared the file", function()
+  -- A long shared paragraph (a licence, a disclaimer) wrapped differently in the
+  -- other document: no line survives, but the paragraph does.
+  local licence = {}
+  for index = 1, 4 do
+    licence[index] = ("Licence clause %d: you may not use this file except in compliance"):format(
+      index
+    ) .. " with the License, a copy of which is included with this work."
+  end
+  local function with_licence(subject, width)
+    return wrapped(vim.list_extend(prose(subject), licence), width)
+  end
+  local original = with_licence("alpha", 80)
+  local root, store = fixture({ ["docs/a.md"] = original })
+  local render = require("contextmark.render")
+  add_note(root, "docs/a.md", 3, 3, "about alpha")
+
+  vim.fn.writefile(with_licence("omega", 60), root .. "/docs/a.md")
+  vim.cmd.edit(root .. "/docs/a.md")
+  render.render(vim.api.nvim_get_current_buf())
+  local comment = store.list(root, "docs/a.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  -- The shared licence is all the two have in common, which is not the note's
+  -- file. Clearing it on the paragraphs alone skipped asking the note.
+  equal(comment.anchor.status, "mismatch")
+end)
+
+test("does not recapture a sibling pasted into the buffer before :w", function()
+  local original = adr("PostgreSQL", "We adopt PostgreSQL.")
+  local root, store = fixture({ ["docs/adr-001.md"] = original })
+  local render = require("contextmark.render")
+  adr_note(root, store, original)
+  vim.cmd.edit(root .. "/docs/adr-001.md")
+  local bufnr = vim.api.nvim_get_current_buf()
+  render.render(bufnr)
+
+  -- The author pastes the other ADR over everything but the shared heading the
+  -- note sits on, so its extmark survives. No render runs before :w, and :w
+  -- syncs first: that sync must judge the file the way render would.
+  local sibling = adr("OAuth", "We adopt OAuth.")
+  local decision_at
+  for index, line in ipairs(original) do
+    if line == "## Decision" then
+      decision_at = index
+    end
+  end
+  vim.api.nvim_buf_set_lines(
+    bufnr,
+    decision_at,
+    -1,
+    false,
+    vim.list_slice(sibling, decision_at + 1)
+  )
+  vim.api.nvim_buf_set_lines(
+    bufnr,
+    0,
+    decision_at - 1,
+    false,
+    vim.list_slice(sibling, 1, decision_at - 1)
+  )
+  render.sync(bufnr)
+  local comment = store.list(root, "docs/adr-001.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  -- Recapturing would store the sibling's lines as this note's surroundings,
+  -- after which the note would "recognise" the sibling for good.
+  equal(comment.anchor.before, { "Context of PostgreSQL, point 4.", "" })
+  equal(comment.anchor.after, { "", "We adopt PostgreSQL." })
+end)
+
+test("judges a closed file even when a similarly named buffer is open", function()
+  local root, store = fixture({
+    ["docs/a.md"] = document("Alpha"),
+    ["docs/a.md.bak"] = document("Backup"),
+  })
+  local plugin = require("contextmark")
+  add_note(root, "docs/a.md", marked_at, marked_at, "about Alpha")
+  vim.fn.writefile(document("Gamma"), root .. "/docs/a.md")
+
+  -- bufnr() matches names as patterns, so asking for docs/a.md found this.
+  vim.cmd.edit(root .. "/docs/a.md.bak")
+  local text = plugin.build_prompt("all")
+  vim.cmd.enew({ bang = true })
+
+  assert(text:find("Status: different file?", 1, true), text)
+end)
+
 test("does not flag a heavy rewrite that left the note's surroundings", function()
   local root, store = fixture({ ["docs/adr-001.md"] = adr("PostgreSQL", "We adopt PostgreSQL.") })
   local render = require("contextmark.render")

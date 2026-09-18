@@ -29,7 +29,7 @@ MUTATIONS = [
     (
         "sync verdict ignored",
         "lua/contextmark/render.lua",
-        'frozen = file_verdict(bufnr, root, relative, lines) == "replaced"',
+        'frozen = M.judge(root, relative, lines, comments, bufnr) == "replaced"',
         "frozen = false",
     ),
     (
@@ -297,14 +297,14 @@ MUTATIONS = [
     (
         "wrap tolerance off",
         "lua/contextmark/identity.lua",
-        "    type(stored.paragraphs) == \"table\"\n    and #stored.paragraphs >= paragraph_sample_floor",
-        "    false\n    and #stored.paragraphs >= paragraph_sample_floor",
+        "  if type(stored.paragraphs) == \"table\" and #stored.paragraphs >= paragraph_sample_floor then",
+        "  if false then",
     ),
     (
         "closed files not judged for the prompt",
         "lua/contextmark/init.lua",
-        "      verdicts[relative] = read\n        and type(lines) == \"table\"",
-        "      verdicts[relative] = false\n        and type(lines) == \"table\"",
+        "      verdicts[relative] = type(lines) == \"table\"\n        and render.judge(",
+        "      verdicts[relative] = false\n        and render.judge(",
     ),
     (
         "notes not consulted on weak file evidence",
@@ -315,14 +315,8 @@ MUTATIONS = [
     (
         "notes never recognize their surroundings",
         "lua/contextmark/render.lua",
-        "        if identity.contains(present, line) then\n          return true",
-        "        if false then\n          return true",
-    ),
-    (
-        "note excerpt counted as its surroundings",
-        "lua/contextmark/render.lua",
-        "    for _, group in ipairs({ stored.before, stored.after }) do",
-        "    for _, group in ipairs({ stored.excerpt, stored.before, stored.after }) do",
+        "local function notes_recognize(comments, lines)\n",
+        "local function notes_recognize(comments, lines)\n  do\n    return false\n  end\n",
     ),
     (
         "blank-only file judged as replaced",
@@ -335,6 +329,30 @@ MUTATIONS = [
         "lua/contextmark/anchor.lua",
         "    if line:match(\"%S\") then\n      return false\n    end",
         "    if line ~= \"\" then\n      return false\n    end",
+    ),
+    (
+        "paragraph rescue reports a full share",
+        "lua/contextmark/identity.lua",
+        "      return \"same\", current, paragraph_hits / #stored.paragraphs",
+        "      return \"same\", current, 1",
+    ),
+    (
+        "sync skips the note judgement",
+        "lua/contextmark/render.lua",
+        "    frozen = M.judge(root, relative, lines, comments, bufnr) == \"replaced\"",
+        "    frozen = file_verdict(bufnr, root, relative, lines) == \"replaced\"",
+    ),
+    (
+        "closed-file lookup by bufnr() pattern",
+        "lua/contextmark/init.lua",
+        "      local open = util.buffer_for(path) ~= nil",
+        "      local open = vim.fn.bufnr(path) >= 0",
+    ),
+    (
+        "closed files judged without the notes",
+        "lua/contextmark/render.lua",
+        "    verdict, fingerprint, share = identity.compare(store.fingerprint(root, relative), lines)\n  end",
+        "    return identity.compare(store.fingerprint(root, relative), lines)\n  end",
     ),
     (
         "deletion tombstones off",

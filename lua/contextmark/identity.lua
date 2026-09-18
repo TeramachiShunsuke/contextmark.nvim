@@ -224,30 +224,26 @@ function M.compare(stored, lines)
   -- Paragraphs are wrap-independent, so ask them before calling this a different
   -- file. Fingerprints written before paragraphs were recorded have none, and
   -- are judged by their lines alone.
-  if
-    type(stored.paragraphs) == "table"
-    and #stored.paragraphs >= paragraph_sample_floor
-    and survives(stored.paragraphs, set_of(paragraphs))
-  then
-    return "same", current, 1
+  if type(stored.paragraphs) == "table" and #stored.paragraphs >= paragraph_sample_floor then
+    local paragraph_hits = hits_in(stored.paragraphs, set_of(paragraphs))
+    if paragraph_hits * survival_denominator >= #stored.paragraphs then
+      -- Report the paragraphs' share, not a blanket 1: a single shared licence
+      -- paragraph clears two unrelated documents here, and the caller only asks
+      -- the notes when the share is low.
+      return "same", current, paragraph_hits / #stored.paragraphs
+    end
   end
   return "replaced", current, hits / total
 end
 
--- The canonical lines of `lines`, for asking whether a particular line is still
--- in the file. Shares the per-line digest cache with everything else here.
-function M.line_set(lines)
-  local present = {}
-  for _, line in ipairs(lines) do
-    if line:match("%S") then
-      present[line_digest(line)] = true
-    end
-  end
-  return present
-end
-
-function M.contains(present, line)
-  return type(line) == "string" and line:match("%S") ~= nil and present[line_digest(line)] == true
+-- Whether two lines are the same text, compared the way the fingerprint compares
+-- them (whitespace amounts ignored). Blank lines are never a match: they are
+-- beside everything.
+function M.same_line(left, right)
+  return type(left) == "string"
+    and type(right) == "string"
+    and left:match("%S") ~= nil
+    and line_digest(left) == line_digest(right)
 end
 
 return M

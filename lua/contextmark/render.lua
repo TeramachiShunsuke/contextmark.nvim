@@ -46,23 +46,59 @@ end
 -- can call it the same file; what it cannot share is the text each note was
 -- written next to.
 --
+-- "Surroundings" means the lines right beside where the note resolves now, not
+-- a context line found anywhere in the file: a sibling document can carry one
+-- of those lines somewhere else, and a note on boilerplate would then be cleared
+-- by boilerplate.
+--
 -- The note's own excerpt does not count. It is often the very boilerplate the
 -- two documents share -- a note on "## Decision" resolves in every ADR ever
 -- written from that template -- and whether the excerpt resolves is what
 -- anchor.resolve() already reports.
 local function notes_recognize(comments, lines)
-  local present = identity.line_set(lines)
   for _, comment in ipairs(comments) do
     local stored = comment.anchor
-    for _, group in ipairs({ stored.before, stored.after }) do
-      for _, line in ipairs(type(group) == "table" and group or {}) do
-        if identity.contains(present, line) then
+    local start_line, end_line = anchor.resolve(lines, stored)
+    if start_line then
+      local before = type(stored.before) == "table" and stored.before or {}
+      for index, line in ipairs(before) do
+        if identity.same_line(line, lines[start_line - #before - 1 + index]) then
+          return true
+        end
+      end
+      for index, line in ipairs(type(stored.after) == "table" and stored.after or {}) do
+        if identity.same_line(line, lines[end_line + index]) then
           return true
         end
       end
     end
   end
   return false
+end
+
+-- Whether the file in `lines` is still the one the notes at `relative` were
+-- written against: "same" / "replaced" / "unknown", plus the fingerprint to
+-- record if it is. The single place that decision is made -- render, sync and
+-- the prompt for closed files all go through it, so none of them can take a
+-- sibling document for the note's file while another path flags it.
+function M.judge(root, relative, lines, comments, bufnr)
+  local verdict, fingerprint, share
+  if bufnr then
+    verdict, fingerprint, share = file_verdict(bufnr, root, relative, lines)
+  else
+    verdict, fingerprint, share = identity.compare(store.fingerprint(root, relative), lines)
+  end
+  if
+    verdict == "same"
+    and share
+    and share < weak_evidence
+    and not notes_recognize(comments, lines)
+  then
+    -- Recognised only by boilerplate, and not one note found the text it was
+    -- written beside: a sibling document has taken this file's place.
+    verdict = "replaced"
+  end
+  return verdict, fingerprint
 end
 
 -- Reported once per root: a sidecar that cannot be written means the notes just
@@ -220,19 +256,8 @@ function M.render(bufnr)
       break
     end
   end
-  local share
   if #comments > 0 then
-    verdict, fingerprint, share = file_verdict(bufnr, root, relative, lines)
-  end
-  if
-    verdict == "same"
-    and share
-    and share < weak_evidence
-    and not notes_recognize(comments, lines)
-  then
-    -- Recognised only by boilerplate, and not one note found the text it was
-    -- written beside: a sibling document has taken this file's place.
-    verdict = "replaced"
+    verdict, fingerprint = M.judge(root, relative, lines, comments, bufnr)
   end
   local replaced = verdict == "replaced"
 
@@ -369,7 +394,7 @@ function M.sync(bufnr)
   -- note that resolved as healthy in a replacement file is protected too.
   local frozen = false
   if #comments > 0 then
-    frozen = file_verdict(bufnr, root, relative, lines) == "replaced"
+    frozen = M.judge(root, relative, lines, comments, bufnr) == "replaced"
   end
 
   local line_count = math.max(#lines, 1)
