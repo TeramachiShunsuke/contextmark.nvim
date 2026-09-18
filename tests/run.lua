@@ -2692,7 +2692,7 @@ test("does not remove a fresh lock taken while a stale one was being cleared", f
       local handle = assert(vim.uv.fs_open(lock, "wx", 384))
       vim.uv.fs_close(handle)
       theirs = original_stat(lock).ino
-    elseif info and theirs and path:find(lock .. ".stale-", 1, true) == 1 then
+    elseif info and theirs and path == lock then
       -- Linux hands the freed inode number straight to the next file, so the
       -- fresh lock can look like the stale one by inode alone. Reproduce that
       -- on every platform.
@@ -2714,64 +2714,46 @@ test("does not remove a fresh lock taken while a stale one was being cleared", f
   equal(survivor.ino, theirs)
 end)
 
-test("keeps the moved lock when restoring it loses the race", function()
+test("leaves a stale lock alone while another waiter is clearing it", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   add_note(root, "docs/a.md", marked_at, marked_at)
   local lock = store.path(root) .. ".lock"
   vim.fn.writefile({}, lock)
   local stale = os.time() - 60
   vim.uv.fs_utime(lock, stale, stale)
+  local stale_ino = vim.uv.fs_stat(lock).ino
+  -- Another waiter is in the middle of clearing it.
+  vim.fn.writefile({}, lock .. ".break")
 
-  local original_stat = vim.uv.fs_stat
-  local original_rename = vim.uv.fs_rename
-  local original_link = vim.uv.fs_link
-  local aside, staged, moved_lock, theirs
-  vim.uv.fs_stat = function(path, ...)
-    local info = original_stat(path, ...)
-    if path == lock and not staged then
-      vim.uv.fs_unlink(lock)
-      local handle = assert(vim.uv.fs_open(lock, "wx", 384))
-      vim.uv.fs_close(handle)
-      moved_lock = assert(original_stat(lock)).ino
-      staged = true
-    end
-    return info
-  end
-  vim.uv.fs_rename = function(from, to, ...)
-    if from == lock and not aside then
-      aside = to
-    end
-    return original_rename(from, to, ...)
-  end
-  vim.uv.fs_link = function(from, to, ...)
-    if from == aside and to == lock and not theirs then
-      local handle = assert(vim.uv.fs_open(lock, "wx", 384))
-      vim.uv.fs_close(handle)
-      theirs = assert(original_stat(lock)).ino
-    end
-    return original_link(from, to, ...)
-  end
-  local ok, saved = pcall(store.save, root)
-  vim.uv.fs_stat = original_stat
-  vim.uv.fs_rename = original_rename
-  vim.uv.fs_link = original_link
+  local saved = store.save(root)
   local survivor = vim.uv.fs_stat(lock)
-  local parked = aside and vim.uv.fs_stat(aside)
-  if survivor then
-    vim.uv.fs_unlink(lock)
-  end
-  if parked then
-    vim.uv.fs_unlink(aside)
-  end
-  if not ok then
-    error(saved, 0)
+  vim.uv.fs_unlink(lock)
+  vim.uv.fs_unlink(lock .. ".break")
+
+  -- Clearing it too would race that waiter: whichever of us unlinks second can
+  -- remove the fresh lock the other has just taken.
+  equal(saved, false)
+  assert(survivor, "the stale lock was cleared while another waiter held the breaker")
+  equal(survivor.ino, stale_ino)
+end)
+
+test("clears a breaker left by a waiter that died while clearing", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local lock = store.path(root) .. ".lock"
+  local stale = os.time() - 60
+  for _, path in ipairs({ lock, lock .. ".break" }) do
+    vim.fn.writefile({}, path)
+    vim.uv.fs_utime(path, stale, stale)
   end
 
-  equal(saved, false)
-  assert(survivor, "the other instance's lock was removed")
-  assert(parked, "the moved lock was removed after restore failed")
-  equal(parked.ino, moved_lock)
-  equal(survivor.ino, theirs)
+  local saved = store.save(root)
+  local leftovers = (vim.uv.fs_stat(lock) and 1 or 0)
+    + (vim.uv.fs_stat(lock .. ".break") and 1 or 0)
+
+  -- Otherwise one crash would block every save to this project for good.
+  equal(saved, true)
+  equal(leftovers, 0)
 end)
 
 test("expands only a leading ~ in :ContextMarkMove paths", function()

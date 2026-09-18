@@ -351,6 +351,48 @@ local lock_stale_seconds = 5
 -- guarantees that no reader sees a half-written file; it does not stop two
 -- instances from each reading, merging and writing, with the later rename
 -- discarding the earlier one's notes.
+local function is_stale(info)
+  return info ~= nil and os.time() - info.mtime.sec > lock_stale_seconds
+end
+
+-- Removes the lock at `lock` only if it is still the stale one we looked at.
+--
+-- Checking and removing must not be separable. Between a waiter's stat and its
+-- unlink, another waiter can clear the same stale lock and take a fresh one,
+-- and an unlink by name then removes that live lock; moving the lock aside to
+-- inspect it instead leaves the path empty for a moment, and a third waiter
+-- takes it while the second still believes it holds the lock. Clearing is
+-- therefore serialized on a second lock: while a waiter holds it, the stale
+-- lock cannot be cleared or replaced by anyone else, so its re-check and
+-- unlink see the same file.
+local function clear_stale_lock(lock, seen)
+  local breaker = lock .. ".break"
+  local handle = vim.uv.fs_open(breaker, "wx", 384)
+  if not handle then
+    -- Another waiter is clearing it. A breaker is held for microseconds, so a
+    -- stale one was left by an instance that died mid-clear.
+    if is_stale(vim.uv.fs_stat(breaker)) then
+      vim.uv.fs_unlink(breaker)
+    end
+    return false
+  end
+  vim.uv.fs_close(handle)
+  local current = vim.uv.fs_stat(lock)
+  -- The inode alone is not enough: Linux reuses a freed inode number at once,
+  -- so a fresh lock can carry the stale one's number. A fresh lock is also not
+  -- stale.
+  local cleared = current ~= nil
+    and current.ino == seen.ino
+    and current.mtime.sec == seen.mtime.sec
+    and current.mtime.nsec == seen.mtime.nsec
+    and is_stale(current)
+  if cleared then
+    vim.uv.fs_unlink(lock)
+  end
+  vim.uv.fs_unlink(breaker)
+  return cleared
+end
+
 local function acquire_lock(path)
   local lock = path .. ".lock"
   for _ = 1, lock_attempts do
@@ -360,34 +402,8 @@ local function acquire_lock(path)
       return lock
     end
     local info = vim.uv.fs_stat(lock)
-    if info and os.time() - info.mtime.sec > lock_stale_seconds then
-      -- Left behind by an instance that died before releasing it. Another
-      -- waiter may have cleared it and taken a fresh lock since our stat, so
-      -- move it aside first and only discard it if it is the one we judged
-      -- stale; unlinking by name would remove that waiter's live lock.
-      local aside = ("%s.stale-%s"):format(lock, tostring(vim.uv.hrtime()))
-      if vim.uv.fs_rename(lock, aside) then
-        local moved = vim.uv.fs_stat(aside)
-        -- The inode alone is not enough: Linux reuses a freed inode number at
-        -- once, so a fresh lock created right after the stale one was removed
-        -- can carry the same number. A fresh lock is also not stale.
-        local same = moved
-          and moved.ino == info.ino
-          and moved.mtime.sec == info.mtime.sec
-          and moved.mtime.nsec == info.mtime.nsec
-          and os.time() - moved.mtime.sec > lock_stale_seconds
-        local restored = false
-        if moved and not same then
-          -- Not the stale lock: hand it back. link() refuses to replace a lock
-          -- that appeared in the meantime.
-          restored = vim.uv.fs_link(aside, lock) ~= nil
-          vim.uv.sleep(lock_wait_ms)
-        end
-        if same or restored then
-          vim.uv.fs_unlink(aside)
-        end
-      end
-    else
+    -- Left behind by an instance that died before releasing it.
+    if not (is_stale(info) and clear_stale_lock(lock, info)) then
       vim.uv.sleep(lock_wait_ms)
     end
   end
