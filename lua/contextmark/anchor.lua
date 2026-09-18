@@ -114,8 +114,15 @@ local function context_score(lines, stored, start_line, end_line, start_col, end
   return score
 end
 
+-- No text at all. A file cleared in an editor often keeps a few blank lines,
+-- and those are as empty as {} to anyone reading it.
 local function is_effectively_empty(lines)
-  return #lines == 0 or (#lines == 1 and lines[1] == "")
+  for _, line in ipairs(lines) do
+    if line:match("%S") then
+      return false
+    end
+  end
+  return true
 end
 
 local function candidates(lines, excerpt)

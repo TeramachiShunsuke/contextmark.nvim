@@ -1028,6 +1028,28 @@ test("does not flag a heavy rewrite that left the note's surroundings", function
   equal(comment.anchor.status, "exact")
 end)
 
+test("reports a file cleared down to blank lines as empty, not replaced", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  -- What deleting every line leaves in many editors: a few blank lines.
+  vim.fn.writefile({ "", "", "   " }, root .. "/docs/a.md")
+
+  local render = require("contextmark.render")
+  vim.cmd.edit(root .. "/docs/a.md")
+  render.render(vim.api.nvim_get_current_buf())
+  local comment = store.list(root, "docs/a.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  -- Blank lines carry no identity either way. "different file?" was wrong: the
+  -- author cleared this file, nobody put another one in its place.
+  equal(comment.anchor.status, "orphaned")
+  equal(comment.anchor.excerpt, { marked_line })
+  -- The same holds for the prompt, which judges closed files by identity alone.
+  local identity = require("contextmark.identity")
+  local verdict = identity.compare(identity.fingerprint(document("Alpha")), { "", "", "   " })
+  equal(verdict, "unknown")
+end)
+
 test("samples the whole document, not just its opening", function()
   local identity = require("contextmark.identity")
   -- 60 significant lines. A stepped walk used to spend the whole sample inside

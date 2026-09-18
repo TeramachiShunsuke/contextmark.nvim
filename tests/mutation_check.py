@@ -331,6 +331,18 @@ MUTATIONS = [
         "    for _, group in ipairs({ stored.excerpt, stored.before, stored.after }) do",
     ),
     (
+        "blank-only file judged as replaced",
+        "lua/contextmark/identity.lua",
+        "  if #body == 0 then\n    return \"unknown\", current\n  end",
+        "",
+    ),
+    (
+        "blank-only file not treated as empty",
+        "lua/contextmark/anchor.lua",
+        "    if line:match(\"%S\") then\n      return false\n    end",
+        "    if line ~= \"\" then\n      return false\n    end",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",

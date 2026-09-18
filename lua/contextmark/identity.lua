@@ -209,6 +209,11 @@ function M.compare(stored, lines)
   if total < ratio_floor then
     return "unknown", current
   end
+  -- Nothing but blank lines: no text to recognise or to accuse. The file was
+  -- cleared, which anchor.resolve() reports as "orphaned".
+  if #body == 0 then
+    return "unknown", current
+  end
 
   local hits = hits_in(stored.sample, set_of(body))
   if hits * survival_denominator >= total then
