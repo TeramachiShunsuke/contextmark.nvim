@@ -386,7 +386,7 @@ local function owner_is_alive(path)
     if result ~= nil then
       return true
     end
-    return error_name ~= "ESRCH"
+    return not is_missing_process(error_message, error_name)
   end
   return not is_missing_process(result, error_message, error_name)
 end
