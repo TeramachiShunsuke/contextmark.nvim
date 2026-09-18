@@ -376,13 +376,16 @@ local function acquire_lock(path)
           and moved.mtime.sec == info.mtime.sec
           and moved.mtime.nsec == info.mtime.nsec
           and os.time() - moved.mtime.sec > lock_stale_seconds
+        local restored = false
         if moved and not same then
           -- Not the stale lock: hand it back. link() refuses to replace a lock
           -- that appeared in the meantime.
-          vim.uv.fs_link(aside, lock)
+          restored = vim.uv.fs_link(aside, lock) ~= nil
           vim.uv.sleep(lock_wait_ms)
         end
-        vim.uv.fs_unlink(aside)
+        if same or restored then
+          vim.uv.fs_unlink(aside)
+        end
       end
     else
       vim.uv.sleep(lock_wait_ms)

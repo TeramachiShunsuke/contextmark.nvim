@@ -2714,6 +2714,66 @@ test("does not remove a fresh lock taken while a stale one was being cleared", f
   equal(survivor.ino, theirs)
 end)
 
+test("keeps the moved lock when restoring it loses the race", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({}, lock)
+  local stale = os.time() - 60
+  vim.uv.fs_utime(lock, stale, stale)
+
+  local original_stat = vim.uv.fs_stat
+  local original_rename = vim.uv.fs_rename
+  local original_link = vim.uv.fs_link
+  local aside, staged, moved_lock, theirs
+  vim.uv.fs_stat = function(path, ...)
+    local info = original_stat(path, ...)
+    if path == lock and not staged then
+      vim.uv.fs_unlink(lock)
+      local handle = assert(vim.uv.fs_open(lock, "wx", 384))
+      vim.uv.fs_close(handle)
+      moved_lock = assert(original_stat(lock)).ino
+      staged = true
+    end
+    return info
+  end
+  vim.uv.fs_rename = function(from, to, ...)
+    if from == lock and not aside then
+      aside = to
+    end
+    return original_rename(from, to, ...)
+  end
+  vim.uv.fs_link = function(from, to, ...)
+    if from == aside and to == lock and not theirs then
+      local handle = assert(vim.uv.fs_open(lock, "wx", 384))
+      vim.uv.fs_close(handle)
+      theirs = assert(original_stat(lock)).ino
+    end
+    return original_link(from, to, ...)
+  end
+  local ok, saved = pcall(store.save, root)
+  vim.uv.fs_stat = original_stat
+  vim.uv.fs_rename = original_rename
+  vim.uv.fs_link = original_link
+  local survivor = vim.uv.fs_stat(lock)
+  local parked = aside and vim.uv.fs_stat(aside)
+  if survivor then
+    vim.uv.fs_unlink(lock)
+  end
+  if parked then
+    vim.uv.fs_unlink(aside)
+  end
+  if not ok then
+    error(saved, 0)
+  end
+
+  equal(saved, false)
+  assert(survivor, "the other instance's lock was removed")
+  assert(parked, "the moved lock was removed after restore failed")
+  equal(parked.ino, moved_lock)
+  equal(survivor.ino, theirs)
+end)
+
 test("expands only a leading ~ in :ContextMarkMove paths", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   local plugin = require("contextmark")

@@ -295,6 +295,12 @@ MUTATIONS = [
         "\n",
     ),
     (
+        "stale lock restore failure cleanup off",
+        "lua/contextmark/store.lua",
+        "        if same or restored then\n          vim.uv.fs_unlink(aside)\n        end",
+        "        if true then\n          vim.uv.fs_unlink(aside)\n        end",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",
