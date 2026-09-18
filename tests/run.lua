@@ -2756,6 +2756,24 @@ test("clears a breaker left by a waiter that died while clearing", function()
   equal(leftovers, 0)
 end)
 
+test("does not clear a stale-looking lock whose owner is still alive", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({ "pid:" .. tostring(vim.fn.getpid()) }, lock)
+  local stale = os.time() - 60
+  vim.uv.fs_utime(lock, stale, stale)
+
+  local saved = store.save(root)
+  local survivor = vim.uv.fs_stat(lock)
+  vim.uv.fs_unlink(lock)
+
+  -- A valid save can outlive the stale timeout. Clearing its lock anyway lets a
+  -- second writer run concurrently and lose one side's updates.
+  equal(saved, false)
+  assert(survivor, "the live writer's lock was cleared by mtime alone")
+end)
+
 test("expands only a leading ~ in :ContextMarkMove paths", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   local plugin = require("contextmark")

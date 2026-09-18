@@ -346,13 +346,41 @@ end
 local lock_attempts = 40
 local lock_wait_ms = 10
 local lock_stale_seconds = 5
+local lock_owner_prefix = "pid:"
 
 -- The whole read-modify-write has to be exclusive. The atomic rename only
 -- guarantees that no reader sees a half-written file; it does not stop two
 -- instances from each reading, merging and writing, with the later rename
 -- discarding the earlier one's notes.
-local function is_stale(info)
-  return info ~= nil and os.time() - info.mtime.sec > lock_stale_seconds
+local function read_lock_owner(path)
+  local file = io.open(path, "r")
+  if not file then
+    return nil
+  end
+  local first = file:read("*l")
+  file:close()
+  return first and tonumber(first:match("^" .. lock_owner_prefix .. "(%d+)$")) or nil
+end
+
+local function owner_is_alive(path)
+  local pid = read_lock_owner(path)
+  if not (pid and pid > 0 and vim.uv.kill) then
+    return false
+  end
+  local ok, result, error_message = pcall(vim.uv.kill, pid, 0)
+  if not ok then
+    return false
+  end
+  if result == nil then
+    return error_message ~= "ESRCH"
+  end
+  return true
+end
+
+local function is_stale(info, path)
+  return info ~= nil
+    and os.time() - info.mtime.sec > lock_stale_seconds
+    and not (path and owner_is_alive(path))
 end
 
 -- Removes the lock at `lock` only if it is still the stale one we looked at.
@@ -385,7 +413,7 @@ local function clear_stale_lock(lock, seen)
     and current.ino == seen.ino
     and current.mtime.sec == seen.mtime.sec
     and current.mtime.nsec == seen.mtime.nsec
-    and is_stale(current)
+    and is_stale(current, lock)
   if cleared then
     vim.uv.fs_unlink(lock)
   end
@@ -398,12 +426,18 @@ local function acquire_lock(path)
   for _ = 1, lock_attempts do
     local handle = vim.uv.fs_open(lock, "wx", 384)
     if handle then
+      local owner = lock_owner_prefix .. tostring(vim.fn.getpid()) .. "\n"
+      local written, write_error = vim.uv.fs_write(handle, owner, -1)
       vim.uv.fs_close(handle)
-      return lock
+      if written then
+        return lock
+      end
+      vim.uv.fs_unlink(lock)
+      return nil, write_error or "could not initialize the sidecar lock"
     end
     local info = vim.uv.fs_stat(lock)
     -- Left behind by an instance that died before releasing it.
-    if not (is_stale(info) and clear_stale_lock(lock, info)) then
+    if not (is_stale(info, lock) and clear_stale_lock(lock, info)) then
       vim.uv.sleep(lock_wait_ms)
     end
   end
@@ -450,11 +484,11 @@ function M.save(root)
   end
   vim.fn.mkdir(storage_dir(), "p")
 
-  local lock = acquire_lock(path)
+  local lock, lock_error = acquire_lock(path)
   if not lock then
     -- Refuse rather than overwrite: another instance is mid-write, and our copy
     -- does not include whatever it is about to store.
-    return false, "sidecar is locked by another Neovim instance"
+    return false, lock_error or "sidecar is locked by another Neovim instance"
   end
 
   -- Fold in anything written between load() and taking the lock. A second

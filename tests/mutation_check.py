@@ -291,7 +291,7 @@ MUTATIONS = [
     (
         "stale lock judged by inode alone",
         "lua/contextmark/store.lua",
-        "    and current.mtime.sec == seen.mtime.sec\n    and current.mtime.nsec == seen.mtime.nsec\n    and is_stale(current)\n",
+        "    and current.mtime.sec == seen.mtime.sec\n    and current.mtime.nsec == seen.mtime.nsec\n    and is_stale(current, lock)\n",
         "\n",
     ),
     (
@@ -299,6 +299,12 @@ MUTATIONS = [
         "lua/contextmark/store.lua",
         "    if is_stale(vim.uv.fs_stat(breaker)) then",
         "    if false then",
+    ),
+    (
+        "live lock owner ignored",
+        "lua/contextmark/store.lua",
+        "    and not (path and owner_is_alive(path))\n",
+        "\n",
     ),
     (
         "deletion tombstones off",
@@ -309,7 +315,7 @@ MUTATIONS = [
     (
         "save lock off",
         "lua/contextmark/store.lua",
-        "  local lock = acquire_lock(path)\n  if not lock then",
+        "  local lock, lock_error = acquire_lock(path)\n  if not lock then",
         "  local lock = path .. \".lock\"\n  if false then",
     ),
     (
