@@ -355,15 +355,21 @@ local lock_owner_prefix = "pid:"
 local function read_lock_owner(path)
   local file = io.open(path, "r")
   if not file then
-    return nil
+    return nil, false
   end
-  local first = file:read("*l")
-  file:close()
-  return first and tonumber(first:match("^" .. lock_owner_prefix .. "(%d+)$")) or nil
+  local first, read_error = file:read("*l")
+  local closed, close_error = file:close()
+  if read_error or not closed then
+    return nil, false
+  end
+  return first and tonumber(first:match("^" .. lock_owner_prefix .. "(%d+)$")) or nil, true
 end
 
 local function owner_is_alive(path)
-  local pid = read_lock_owner(path)
+  local pid, readable = read_lock_owner(path)
+  if readable == false then
+    return true
+  end
   if not (pid and pid > 0 and vim.uv.kill) then
     return false
   end
