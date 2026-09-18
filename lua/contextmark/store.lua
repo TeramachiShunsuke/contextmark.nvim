@@ -448,12 +448,12 @@ local function acquire_lock(path)
     if handle then
       local owner = lock_owner_prefix .. tostring(vim.fn.getpid()) .. "\n"
       local written, write_error = vim.uv.fs_write(handle, owner, -1)
-      vim.uv.fs_close(handle)
-      if written then
+      local closed, close_error = pcall(vim.uv.fs_close, handle)
+      if written and closed then
         return lock
       end
       vim.uv.fs_unlink(lock)
-      return nil, write_error or "could not initialize the sidecar lock"
+      return nil, write_error or close_error or "could not initialize the sidecar lock"
     end
     local info = vim.uv.fs_stat(lock)
     -- Left behind by an instance that died before releasing it.
