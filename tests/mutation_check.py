@@ -309,7 +309,7 @@ MUTATIONS = [
     (
         "live lock owner must return dead on ESRCH only",
         "lua/contextmark/store.lua",
-        '  return not tostring(result or ""):match("ESRCH")\n',
+        "  return not is_missing_process(result, error_message, error_name)\n",
         "  return false\n",
     ),
     (

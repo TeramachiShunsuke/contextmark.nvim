@@ -367,11 +367,19 @@ local function owner_is_alive(path)
   if not (pid and pid > 0 and vim.uv.kill) then
     return false
   end
-  local ok, result, error_message = pcall(vim.uv.kill, pid, 0)
-  if ok then
-    return result ~= nil or not tostring(error_message or ""):match("ESRCH")
+  local function is_missing_process(...)
+    for index = 1, select("#", ...) do
+      if tostring(select(index, ...)):match("ESRCH") then
+        return true
+      end
+    end
+    return false
   end
-  return not tostring(result or ""):match("ESRCH")
+  local ok, result, error_message, error_name = pcall(vim.uv.kill, pid, 0)
+  if ok then
+    return result ~= nil or not is_missing_process(error_message, error_name)
+  end
+  return not is_missing_process(result, error_message, error_name)
 end
 
 local function is_stale(info, path)
