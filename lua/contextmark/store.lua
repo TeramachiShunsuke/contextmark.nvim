@@ -377,7 +377,10 @@ local function owner_is_alive(path)
   end
   local ok, result, error_message, error_name = pcall(vim.uv.kill, pid, 0)
   if ok then
-    return result ~= nil or not is_missing_process(error_message, error_name)
+    if result ~= nil then
+      return true
+    end
+    return error_name ~= "ESRCH"
   end
   return not is_missing_process(result, error_message, error_name)
 end

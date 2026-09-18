@@ -2783,10 +2783,14 @@ test("does not clear a stale-looking lock when owner liveness returns EPERM", fu
   vim.uv.fs_utime(lock, stale, stale)
 
   local original_kill = vim.uv.kill
-  vim.uv.kill = function()
-    error("EPERM", 0)
-  end
-  local ok, saved = pcall(store.save, root)
+  local ok, saved = xpcall(function()
+    vim.uv.kill = function()
+      error("EPERM", 0)
+    end
+    return store.save(root)
+  end, function(error_message)
+    return error_message
+  end)
   vim.uv.kill = original_kill
   local survivor = vim.uv.fs_stat(lock)
   vim.uv.fs_unlink(lock)
