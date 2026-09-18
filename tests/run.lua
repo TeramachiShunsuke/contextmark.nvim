@@ -2774,6 +2774,30 @@ test("does not clear a stale-looking lock whose owner is still alive", function(
   assert(survivor, "the live writer's lock was cleared by mtime alone")
 end)
 
+test("does not clear a stale-looking lock when owner liveness returns EPERM", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({ "pid:" .. tostring(vim.fn.getpid()) }, lock)
+  local stale = os.time() - 60
+  vim.uv.fs_utime(lock, stale, stale)
+
+  local original_kill = vim.uv.kill
+  vim.uv.kill = function()
+    error("EPERM", 0)
+  end
+  local ok, saved = pcall(store.save, root)
+  vim.uv.kill = original_kill
+  local survivor = vim.uv.fs_stat(lock)
+  vim.uv.fs_unlink(lock)
+  if not ok then
+    error(saved, 0)
+  end
+
+  equal(saved, false)
+  assert(survivor, "the live writer's lock was cleared after EPERM")
+end)
+
 test("expands only a leading ~ in :ContextMarkMove paths", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   local plugin = require("contextmark")
