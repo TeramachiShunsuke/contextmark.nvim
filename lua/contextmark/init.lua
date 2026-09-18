@@ -61,7 +61,11 @@ function M.add()
   local captured =
     anchor.capture(lines, start_line, end_line, config.get().storage.context_lines, selected)
 
-  if identity.compare(store.fingerprint(root, relative), lines) == "replaced" then
+  if render.judge(root, relative, lines, store.list(root, relative), bufnr) == "replaced" then
+    -- Born flagged, like the notes already here: it is written against the
+    -- replacement, and an unflagged note would vouch for that file the next time
+    -- render asks the notes (see notes_recognize).
+    captured.status = "mismatch"
     -- Otherwise the new note is born carrying a "different file?" marker with
     -- no explanation: the flag belongs to the file, not to this note.
     vim.notify(
@@ -265,12 +269,14 @@ local function find_relocations(root, missing)
         local lines = util.read_buffer_or_file(util.absolute_path(root, name))
         if lines then
           for _, entry in ipairs(wanted) do
-            if
-              entry.extension == extension
-              and entry.relative ~= name
-              and identity.compare(entry.stored, lines) == "same"
-            then
-              table.insert(matches[entry.relative], name)
+            if entry.extension == extension and entry.relative ~= name then
+              local verdict, _, share = identity.compare(entry.stored, lines)
+              -- Only a strong match: a document that shares a licence paragraph
+              -- with the missing one is not where its notes went, and there are
+              -- no notes here to ask.
+              if verdict == "same" and share and share > identity.weak_share then
+                table.insert(matches[entry.relative], name)
+              end
             end
           end
         end

@@ -17,11 +17,6 @@ end
 -- hashed the whole document several times for one user action.
 local verdicts = {}
 
--- Below this share of the recorded sample, the file is recognised only by what
--- every document of its kind carries: front matter, headings, a licence block.
--- That is not enough on its own, so the notes get a say (see notes_recognize).
-local weak_evidence = 0.5
-
 local function file_verdict(bufnr, root, relative, lines)
   local stored = store.fingerprint(root, relative)
   local tick = vim.b[bufnr].changedtick
@@ -55,10 +50,16 @@ end
 -- two documents share -- a note on "## Decision" resolves in every ADR ever
 -- written from that template -- and whether the excerpt resolves is what
 -- anchor.resolve() already reports.
+--
+-- A note already flagged "mismatch" has no vote. Once a file is judged replaced,
+-- a note added to it is written against the replacement, and would vouch for it.
 local function notes_recognize(comments, lines)
   for _, comment in ipairs(comments) do
     local stored = comment.anchor
-    local start_line, end_line = anchor.resolve(lines, stored)
+    local start_line, end_line
+    if stored.status ~= "mismatch" then
+      start_line, end_line = anchor.resolve(lines, stored)
+    end
     if start_line then
       local before = type(stored.before) == "table" and stored.before or {}
       for index, line in ipairs(before) do
@@ -91,7 +92,7 @@ function M.judge(root, relative, lines, comments, bufnr)
   if
     verdict == "same"
     and share
-    and share < weak_evidence
+    and share <= identity.weak_share
     and not notes_recognize(comments, lines)
   then
     -- Recognised only by boilerplate, and not one note found the text it was

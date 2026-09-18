@@ -1114,6 +1114,117 @@ test("does not recapture a sibling pasted into the buffer before :w", function()
   equal(comment.anchor.after, { "", "We adopt PostgreSQL." })
 end)
 
+-- Four long paragraphs shared with other documents, as a licence would be.
+local function shared_clauses()
+  local clauses = {}
+  for index = 1, 4 do
+    clauses[index] = ("Shared clause %d: you may not use this file except in compliance"):format(
+      index
+    ) .. " with the License, a copy of which is included with this work."
+  end
+  return clauses
+end
+
+test("asks the notes when exactly half the paragraphs cleared the file", function()
+  local clauses = shared_clauses()
+  local function doc(subject, shared, width)
+    local paragraphs = { "# " .. subject }
+    for index = 1, 2 do
+      local words = {}
+      for step = 1, 60 do
+        words[step] = ("%s-%d-%d"):format(subject, index, step)
+      end
+      paragraphs[#paragraphs + 1] = table.concat(words, " ")
+    end
+    vim.list_extend(paragraphs, shared)
+    return wrapped(paragraphs, width)
+  end
+  -- 4 recorded paragraphs: 2 of the subject, 2 shared clauses.
+  local original = doc("alpha", { clauses[1], clauses[2] }, 80)
+  local root, store = fixture({ ["docs/a.md"] = original })
+  local render = require("contextmark.render")
+  add_note(root, "docs/a.md", 3, 3, "about alpha")
+
+  vim.fn.writefile(doc("omega", { clauses[1], clauses[2] }, 60), root .. "/docs/a.md")
+  vim.cmd.edit(root .. "/docs/a.md")
+  render.render(vim.api.nvim_get_current_buf())
+  local comment = store.list(root, "docs/a.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  -- Half is not a majority: the two shared clauses are all they have in common.
+  equal(comment.anchor.status, "mismatch")
+end)
+
+test("does not relocate a note to a file that only shares boilerplate paragraphs", function()
+  local clauses = shared_clauses()
+  local original = wrapped(vim.list_extend(prose("alpha"), clauses), 80)
+  local root, store = fixture({ ["docs/a.md"] = original })
+  local plugin = require("contextmark")
+  add_note(root, "docs/a.md", 3, 3, "about alpha")
+
+  -- docs/a.md is deleted; an unrelated document with the same clauses exists.
+  vim.fn.delete(root .. "/docs/a.md")
+  vim.fn.writefile(wrapped(vim.list_extend(prose("omega"), clauses), 60), root .. "/docs/b.md")
+  vim.cmd.edit(root .. "/docs/b.md")
+  local offered = false
+  with_select(function(items, _, on_choice)
+    offered = #items > 0
+    on_choice(nil)
+  end, plugin.relocate)
+  local still_on_a = #store.list(root, "docs/a.md")
+  vim.cmd.enew({ bang = true })
+
+  equal(offered, false)
+  equal(still_on_a, 1)
+end)
+
+test("a note added to a replaced file does not vouch for it", function()
+  local original = adr("PostgreSQL", "We adopt PostgreSQL.")
+  local root, store = fixture({ ["docs/adr-001.md"] = original })
+  local plugin = require("contextmark")
+  local render = require("contextmark.render")
+  local identity = require("contextmark.identity")
+  adr_note(root, store, original)
+
+  vim.fn.writefile(adr("OAuth", "We adopt OAuth."), root .. "/docs/adr-001.md")
+  vim.cmd.edit(root .. "/docs/adr-001.md")
+  local bufnr = vim.api.nvim_get_current_buf()
+  render.render(bufnr)
+
+  -- A new note on the sibling. Its surroundings are the sibling's, so letting it
+  -- vote would clear the file and adopt the sibling as the baseline.
+  local original_notify = vim.notify
+  vim.notify = function() end
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  local ok, failure = pcall(plugin.add)
+  local editor = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(editor, 0, -1, false, { "new note on the sibling" })
+  local submit
+  for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(editor, "i")) do
+    if mapping.lhs == "<C-S>" then
+      submit = mapping.callback
+    end
+  end
+  if ok and submit then
+    ok, failure = pcall(submit)
+  end
+  vim.notify = original_notify
+  if not ok then
+    error(failure, 0)
+  end
+  vim.cmd.buffer(bufnr)
+  render.render(bufnr)
+  local statuses = {}
+  for _, comment in ipairs(store.list(root, "docs/adr-001.md")) do
+    statuses[#statuses + 1] = comment.anchor.status
+  end
+  local baseline = store.fingerprint(root, "docs/adr-001.md")
+  vim.cmd.enew({ bang = true })
+
+  equal(statuses, { "mismatch", "mismatch" })
+  equal(baseline.digest, identity.fingerprint(original).digest)
+end)
+
 test("judges a closed file even when a similarly named buffer is open", function()
   local root, store = fixture({
     ["docs/a.md"] = document("Alpha"),

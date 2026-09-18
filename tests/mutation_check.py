@@ -355,6 +355,30 @@ MUTATIONS = [
         "    return identity.compare(store.fingerprint(root, relative), lines)\n  end",
     ),
     (
+        "exactly half the sample trusted",
+        "lua/contextmark/render.lua",
+        "    and share <= identity.weak_share",
+        "    and share < identity.weak_share",
+    ),
+    (
+        "relocation follows a weak match",
+        "lua/contextmark/init.lua",
+        "if verdict == \"same\" and share and share > identity.weak_share then",
+        "if verdict == \"same\" then",
+    ),
+    (
+        "flagged notes vote for the file",
+        "lua/contextmark/render.lua",
+        "    if stored.status ~= \"mismatch\" then\n      start_line, end_line = anchor.resolve(lines, stored)",
+        "    if true then\n      start_line, end_line = anchor.resolve(lines, stored)",
+    ),
+    (
+        "note added to a replaced file born healthy",
+        "lua/contextmark/init.lua",
+        "    captured.status = \"mismatch\"\n",
+        "",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",

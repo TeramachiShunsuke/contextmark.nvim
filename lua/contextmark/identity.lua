@@ -25,6 +25,11 @@ local ratio_floor = 10
 -- accusation flags every note in a file the author is simply rewriting.
 local survival_denominator = 10
 
+-- At or below this share of the recorded sample, a "same" rests on what every
+-- document of its kind carries -- front matter, headings, a licence -- and must
+-- not be trusted on its own: render asks the notes, Relocate does not follow it.
+M.weak_share = 0.5
+
 -- Below this many recorded paragraphs the wrap-independent check has too little
 -- to say: one shared paragraph out of two would clear any file.
 local paragraph_sample_floor = 4
