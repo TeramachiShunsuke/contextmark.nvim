@@ -745,19 +745,56 @@ local function announce_adoptable(bufnr)
   )
 end
 
+-- render() judges a file's identity when its buffer is open. A note whose file
+-- is closed has never been checked against what is on disk now, so a branch
+-- switch or an agent rewriting the file while it was closed reached the prompt
+-- as a healthy note quoting the replacement's text. Judge those here, once per
+-- file, and flag them for this prompt only: the sidecar still describes the
+-- note's own file, and the flag disappears by itself if the file comes back.
+local function flag_replaced_closed_files(root, comments)
+  local verdicts = {}
+  local result = {}
+  for index, comment in ipairs(comments) do
+    local relative = comment.file
+    if verdicts[relative] == nil then
+      local path = util.absolute_path(root, relative)
+      local bufnr = vim.fn.bufnr(path)
+      local open = bufnr >= 0 and vim.api.nvim_buf_is_loaded(bufnr)
+      local stored = store.fingerprint(root, relative)
+      local read, lines = false, nil
+      if not open and stored then
+        -- A file that is gone is not a replacement: Relocate handles that.
+        read, lines = pcall(vim.fn.readfile, path)
+      end
+      verdicts[relative] = read
+        and type(lines) == "table"
+        and identity.compare(stored, lines) == "replaced"
+    end
+    if verdicts[relative] and comment.anchor.status ~= "mismatch" then
+      comment = vim.deepcopy(comment)
+      comment.anchor.status = "mismatch"
+    end
+    result[index] = comment
+  end
+  return result
+end
+
 local function comments_for(scope)
   render.sync_all()
   local _, _, root, relative = current_context()
   if not root then
     return nil, {}
   end
+  local comments
   if scope == "current" then
     local comment = render.at_cursor()
-    return root, comment and { comment } or {}
+    comments = comment and { comment } or {}
   elseif scope == "buffer" then
-    return root, store.list(root, relative)
+    comments = store.list(root, relative)
+  else
+    comments = store.list(root)
   end
-  return root, store.list(root)
+  return root, flag_replaced_closed_files(root, comments)
 end
 
 local function deliver(root, comments, mode)

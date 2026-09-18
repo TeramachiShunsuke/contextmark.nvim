@@ -891,6 +891,29 @@ test("judges a fingerprint written before wrap tolerance by its lines", function
   equal(select(1, identity.compare(legacy, wrapped(prose("omega"), 80))), "replaced")
 end)
 
+test("flags a note whose closed file was replaced behind Neovim's back", function()
+  local root, store = fixture({
+    ["docs/a.md"] = document("Alpha"),
+    ["docs/other.md"] = document("Other"),
+  })
+  local plugin = require("contextmark")
+  add_note(root, "docs/a.md", marked_at, marked_at, "about Alpha")
+
+  -- A branch switch or an agent rewrites the file while it is not open.
+  vim.fn.writefile(document("Gamma"), root .. "/docs/a.md")
+  vim.cmd.edit(root .. "/docs/other.md")
+  local text = plugin.build_prompt("all")
+  local stored = store.list(root, "docs/a.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  -- The note quoted the replacement's text at its old coordinates, with no
+  -- warning, because nothing compared the file while it was closed.
+  assert(text:find("Status: different file?", 1, true), text)
+  assert(text:find("> " .. marked_line, 1, true), text)
+  -- Only the prompt is affected: the sidecar still describes the note's file.
+  equal(stored.anchor.status, "exact")
+end)
+
 test("samples the whole document, not just its opening", function()
   local identity = require("contextmark.identity")
   -- 60 significant lines. A stepped walk used to spend the whole sample inside

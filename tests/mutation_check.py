@@ -307,6 +307,12 @@ MUTATIONS = [
         "    false\n    and #stored.paragraphs >= paragraph_sample_floor",
     ),
     (
+        "closed files not judged for the prompt",
+        "lua/contextmark/init.lua",
+        "      verdicts[relative] = read\n        and type(lines) == \"table\"",
+        "      verdicts[relative] = false\n        and type(lines) == \"table\"",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",
