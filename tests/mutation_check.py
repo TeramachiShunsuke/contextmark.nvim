@@ -301,6 +301,12 @@ MUTATIONS = [
         "        if true then\n          vim.uv.fs_unlink(aside)\n        end",
     ),
     (
+        "wrap tolerance off",
+        "lua/contextmark/identity.lua",
+        "    type(stored.paragraphs) == \"table\"\n    and #stored.paragraphs >= paragraph_sample_floor",
+        "    false\n    and #stored.paragraphs >= paragraph_sample_floor",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",

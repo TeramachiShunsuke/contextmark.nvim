@@ -25,6 +25,10 @@ local ratio_floor = 10
 -- accusation flags every note in a file the author is simply rewriting.
 local survival_denominator = 10
 
+-- Below this many recorded paragraphs the wrap-independent check has too little
+-- to say: one shared paragraph out of two would clear any file.
+local paragraph_sample_floor = 4
+
 local function digest(text)
   -- vim.fn.sha256() turns a string containing NUL into a Blob and raises E976.
   local safe = text:gsub("%z", "\n")
@@ -100,17 +104,61 @@ local function sample_of(body)
   return sample
 end
 
+-- Prose paragraphs survive a change of wrap width; lines do not. A paragraph is
+-- a run of non-blank lines joined into one string, so re-wrapping the same words
+-- leaves its digest untouched.
+--
+-- Only paragraphs with some substance count. A heading, a "---" rule or a lone
+-- list marker is its own paragraph and recurs across unrelated documents built
+-- from the same template, so counting those would call any two of them the same
+-- file.
+-- And nothing above the ceiling: a file with no blank lines is one "paragraph"
+-- of its whole self, which is neither prose nor worth hashing on every render.
+local paragraph_floor = 60
+local paragraph_ceiling = 4000
+
+local function paragraph_digests(lines)
+  local seen, result = {}, {}
+  local current, length = {}, 0
+  local function flush()
+    -- Measured while collecting: a file with no blank lines would otherwise
+    -- concatenate itself in full on every render just to be discarded here.
+    if length >= paragraph_floor and length <= paragraph_ceiling then
+      local value = line_digest(table.concat(current, " "))
+      if not seen[value] then
+        seen[value] = true
+        result[#result + 1] = value
+      end
+    end
+    current, length = {}, 0
+  end
+  for _, line in ipairs(lines) do
+    if line:match("%S") then
+      if length <= paragraph_ceiling then
+        current[#current + 1] = line
+      end
+      length = length + #line + (length > 0 and 1 or 0)
+    else
+      flush()
+    end
+  end
+  flush()
+  return result
+end
+
 -- Returns the fingerprint and the line digests it was built from, so a
 -- comparison does not walk the document twice.
 local function describe(lines)
   local body = significant(lines)
+  local paragraphs = paragraph_digests(lines)
   local current = {
     digest = digest(table.concat(lines, "\n")),
     lines = #lines,
     significant = #body,
     sample = sample_of(body),
+    paragraphs = next(paragraphs) and sample_of(paragraphs) or nil,
   }
-  return current, body
+  return current, body, paragraphs
 end
 
 function M.fingerprint(lines)
@@ -121,8 +169,27 @@ end
 -- "unknown" means no conclusion, which is the state of every note written
 -- before fingerprints existed and of every file too short to judge; callers
 -- must treat it as "do not accuse this file" rather than as a replacement.
+-- How many of `stored` are still present, as a fraction of `stored`.
+local function survives(stored, present)
+  local hits = 0
+  for _, entry in ipairs(stored) do
+    if present[entry] then
+      hits = hits + 1
+    end
+  end
+  return hits * survival_denominator >= #stored
+end
+
+local function set_of(values)
+  local result = {}
+  for _, value in ipairs(values) do
+    result[value] = true
+  end
+  return result
+end
+
 function M.compare(stored, lines)
-  local current, body = describe(lines)
+  local current, body, paragraphs = describe(lines)
   if type(stored) ~= "table" or type(stored.sample) ~= "table" then
     return "unknown", current
   end
@@ -135,17 +202,22 @@ function M.compare(stored, lines)
     return "unknown", current
   end
 
-  local present = {}
-  for _, value in ipairs(body) do
-    present[value] = true
+  if survives(stored.sample, set_of(body)) then
+    return "same", current
   end
-  local hits = 0
-  for _, entry in ipairs(stored.sample) do
-    if present[entry] then
-      hits = hits + 1
-    end
+
+  -- No line survived, which is also what re-wrapping the whole file looks like.
+  -- Paragraphs are wrap-independent, so ask them before calling this a different
+  -- file. Fingerprints written before paragraphs were recorded have none, and
+  -- are judged by their lines alone.
+  if
+    type(stored.paragraphs) == "table"
+    and #stored.paragraphs >= paragraph_sample_floor
+    and survives(stored.paragraphs, set_of(paragraphs))
+  then
+    return "same", current
   end
-  return hits * survival_denominator < total and "replaced" or "same", current
+  return "replaced", current
 end
 
 return M

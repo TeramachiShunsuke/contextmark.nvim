@@ -826,6 +826,71 @@ test("compares file identity by surviving content", function()
   equal(select(1, identity.compare(tiny, { "something else" })), "unknown")
 end)
 
+-- Wraps prose into lines of at most `width` characters, the way prettier's
+-- proseWrap, mdformat --wrap and gq all do.
+local function wrapped(paragraphs, width)
+  local lines = {}
+  for index, paragraph in ipairs(paragraphs) do
+    if index > 1 then
+      lines[#lines + 1] = ""
+    end
+    local current = ""
+    for word in paragraph:gmatch("%S+") do
+      if current == "" then
+        current = word
+      elseif #current + 1 + #word <= width then
+        current = current .. " " .. word
+      else
+        lines[#lines + 1] = current
+        current = word
+      end
+    end
+    lines[#lines + 1] = current
+  end
+  return lines
+end
+
+-- Prose with enough distinct words that re-wrapping moves every line break.
+local function prose(subject)
+  local paragraphs = { "# " .. subject }
+  for index = 1, 12 do
+    local words = {}
+    for step = 1, 40 do
+      words[step] = ("%s-%d-%d"):format(subject, index, step)
+    end
+    paragraphs[#paragraphs + 1] = ("Paragraph %d about %s: "):format(index, subject)
+      .. table.concat(words, " ")
+      .. "."
+  end
+  return paragraphs
+end
+
+test("survives a change of wrap width", function()
+  local identity = require("contextmark.identity")
+  local paragraphs = prose("alpha")
+  local baseline = identity.fingerprint(wrapped(paragraphs, 80))
+
+  -- Not one line survives re-wrapping, but every word does.
+  equal(select(1, identity.compare(baseline, wrapped(paragraphs, 72))), "same")
+  equal(select(1, identity.compare(baseline, wrapped(paragraphs, 100))), "same")
+
+  -- A different document is still a different document, however it is wrapped.
+  local other = identity.fingerprint(wrapped(prose("omega"), 80))
+  equal(select(1, identity.compare(other, wrapped(paragraphs, 72))), "replaced")
+end)
+
+test("judges a fingerprint written before wrap tolerance by its lines", function()
+  local identity = require("contextmark.identity")
+  local paragraphs = prose("alpha")
+  local lines = wrapped(paragraphs, 80)
+  -- What the previous version stored: line samples only.
+  local legacy = identity.fingerprint(lines)
+  legacy.paragraphs = nil
+
+  equal(select(1, identity.compare(legacy, lines)), "same")
+  equal(select(1, identity.compare(legacy, wrapped(prose("omega"), 80))), "replaced")
+end)
+
 test("samples the whole document, not just its opening", function()
   local identity = require("contextmark.identity")
   -- 60 significant lines. A stepped walk used to spend the whole sample inside
