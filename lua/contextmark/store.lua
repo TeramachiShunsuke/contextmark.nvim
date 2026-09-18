@@ -355,7 +355,7 @@ local lock_owner_prefix = "pid:"
 local function read_lock_owner(path)
   local file = io.open(path, "r")
   if not file then
-    return nil, false
+    return nil, vim.uv.fs_stat(path) == nil
   end
   local first, read_error = file:read("*l")
   local closed, close_error = file:close()
