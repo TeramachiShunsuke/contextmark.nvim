@@ -309,8 +309,8 @@ MUTATIONS = [
     (
         "live lock owner must return dead on ESRCH only",
         "lua/contextmark/store.lua",
-        '  return not reason:match("ESRCH")\n',
-        "  return ok and not reason:match(\"ESRCH\")\n",
+        '  return not tostring(result or ""):match("ESRCH")\n',
+        "  return false\n",
     ),
     (
         "deletion tombstones off",

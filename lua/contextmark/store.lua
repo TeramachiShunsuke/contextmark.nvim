@@ -368,8 +368,10 @@ local function owner_is_alive(path)
     return false
   end
   local ok, result, error_message = pcall(vim.uv.kill, pid, 0)
-  local reason = tostring(ok and error_message or result or error_message or "")
-  return not reason:match("ESRCH")
+  if ok then
+    return result ~= nil or not tostring(error_message or ""):match("ESRCH")
+  end
+  return not tostring(result or ""):match("ESRCH")
 end
 
 local function is_stale(info, path)
