@@ -297,7 +297,7 @@ MUTATIONS = [
     (
         "dead breaker never cleared",
         "lua/contextmark/store.lua",
-        "    if is_stale(vim.uv.fs_stat(breaker)) then",
+        "    if is_stale(vim.uv.fs_stat(breaker), breaker) then",
         "    if false then",
     ),
     (
@@ -311,6 +311,18 @@ MUTATIONS = [
         "lua/contextmark/store.lua",
         "  return not is_missing_process(result, error_message, error_name)\n",
         "  return false\n",
+    ),
+    (
+        "pid reuse guard off",
+        "lua/contextmark/store.lua",
+        "    if start and start ~= owner.start then",
+        "    if false and start and start ~= owner.start then",
+    ),
+    (
+        "lock owner short write accepted",
+        "lua/contextmark/store.lua",
+        "      if written == #owner and close_ok and close_result ~= false then",
+        "      if written and close_ok then",
     ),
     (
         "deletion tombstones off",

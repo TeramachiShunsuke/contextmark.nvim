@@ -2737,6 +2737,28 @@ test("leaves a stale lock alone while another waiter is clearing it", function()
   equal(survivor.ino, stale_ino)
 end)
 
+test("does not clear a stale-looking breaker whose owner is still alive", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local lock = store.path(root) .. ".lock"
+  local breaker = lock .. ".break"
+  vim.fn.writefile({}, lock)
+  vim.fn.writefile({ "pid:" .. tostring(vim.fn.getpid()) }, breaker)
+  local stale = os.time() - 60
+  vim.uv.fs_utime(lock, stale, stale)
+  vim.uv.fs_utime(breaker, stale, stale)
+
+  local saved = store.save(root)
+  local lock_survivor = vim.uv.fs_stat(lock)
+  local breaker_survivor = vim.uv.fs_stat(breaker)
+  vim.uv.fs_unlink(lock)
+  vim.uv.fs_unlink(breaker)
+
+  equal(saved, false)
+  assert(lock_survivor, "the stale lock was cleared while another waiter was alive")
+  assert(breaker_survivor, "the active break lock was removed by mtime alone")
+end)
+
 test("clears a breaker left by a waiter that died while clearing", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   add_note(root, "docs/a.md", marked_at, marked_at)
@@ -2800,6 +2822,50 @@ test("does not clear a stale-looking lock when owner liveness returns EPERM", fu
 
   equal(saved, false)
   assert(survivor, "the live writer's lock was cleared after EPERM")
+end)
+
+test("clears a stale lock when only the PID was reused", function()
+  local probe = io.open("/proc/self/stat", "r")
+  if not probe then
+    return
+  end
+  probe:close()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({ "pid:" .. tostring(vim.fn.getpid()) .. ":0" }, lock)
+  local stale = os.time() - 60
+  vim.uv.fs_utime(lock, stale, stale)
+
+  local saved = store.save(root)
+  local survivor = vim.uv.fs_stat(lock)
+
+  equal(saved, true)
+  equal(survivor, nil)
+end)
+
+test("fails lock acquisition when owner write is short", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local lock = store.path(root) .. ".lock"
+
+  local original_write = vim.uv.fs_write
+  local ok, saved = xpcall(function()
+    vim.uv.fs_write = function(_, text)
+      return math.max(#text - 1, 0)
+    end
+    return store.save(root)
+  end, function(error_message)
+    return error_message
+  end)
+  vim.uv.fs_write = original_write
+  if not ok then
+    error(saved, 0)
+  end
+  local survivor = vim.uv.fs_stat(lock)
+
+  equal(saved, false)
+  equal(survivor, nil)
 end)
 
 test("expands only a leading ~ in :ContextMarkMove paths", function()

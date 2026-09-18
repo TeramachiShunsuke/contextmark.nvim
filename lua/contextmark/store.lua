@@ -352,6 +352,48 @@ local lock_owner_prefix = "pid:"
 -- guarantees that no reader sees a half-written file; it does not stop two
 -- instances from each reading, merging and writing, with the later rename
 -- discarding the earlier one's notes.
+local function process_start_token(pid)
+  local file = io.open(("/proc/%d/stat"):format(pid), "r")
+  if not file then
+    return nil
+  end
+  local stat = file:read("*l")
+  file:close()
+  local tail = stat and stat:match("^%d+ %b() (.+)$")
+  if not tail then
+    return nil
+  end
+  local index = 0
+  for field in tail:gmatch("%S+") do
+    index = index + 1
+    if index == 20 then
+      return field
+    end
+  end
+  return nil
+end
+
+local function lock_owner_line()
+  local pid = vim.fn.getpid()
+  local start = process_start_token(pid)
+  if start then
+    return ("%s%d:%s\n"):format(lock_owner_prefix, pid, start)
+  end
+  return ("%s%d\n"):format(lock_owner_prefix, pid)
+end
+
+local function parse_lock_owner(line)
+  local pid, start = line:match("^" .. lock_owner_prefix .. "(%d+):(%d+)$")
+  if pid then
+    return { pid = tonumber(pid), start = start }
+  end
+  pid = line:match("^" .. lock_owner_prefix .. "(%d+)$")
+  if pid then
+    return { pid = tonumber(pid) }
+  end
+  return nil
+end
+
 local function read_lock_owner(path)
   local file = io.open(path, "r")
   if not file then
@@ -368,16 +410,22 @@ local function read_lock_owner(path)
   if read_error or not closed then
     return nil, false
   end
-  return first and tonumber(first:match("^" .. lock_owner_prefix .. "(%d+)$")) or nil, true
+  return first and parse_lock_owner(first) or nil, true
 end
 
 local function owner_is_alive(path)
-  local pid, readable = read_lock_owner(path)
+  local owner, readable = read_lock_owner(path)
   if readable == false then
     return true
   end
-  if not (pid and pid > 0 and vim.uv.kill) then
+  if not (owner and owner.pid and owner.pid > 0 and vim.uv.kill) then
     return false
+  end
+  if owner.start then
+    local start = process_start_token(owner.pid)
+    if start and start ~= owner.start then
+      return false
+    end
   end
   local function is_missing_process(...)
     for index = 1, select("#", ...) do
@@ -387,7 +435,7 @@ local function owner_is_alive(path)
     end
     return false
   end
-  local ok, result, error_message, error_name = pcall(vim.uv.kill, pid, 0)
+  local ok, result, error_message, error_name = pcall(vim.uv.kill, owner.pid, 0)
   if ok then
     if result ~= nil then
       return true
@@ -419,12 +467,18 @@ local function clear_stale_lock(lock, seen)
   if not handle then
     -- Another waiter is clearing it. A breaker is held for microseconds, so a
     -- stale one was left by an instance that died mid-clear.
-    if is_stale(vim.uv.fs_stat(breaker)) then
+    if is_stale(vim.uv.fs_stat(breaker), breaker) then
       vim.uv.fs_unlink(breaker)
     end
     return false
   end
-  vim.uv.fs_close(handle)
+  local owner = lock_owner_line()
+  local written, write_error = vim.uv.fs_write(handle, owner, -1)
+  local close_ok, close_result = pcall(vim.uv.fs_close, handle)
+  if written ~= #owner or not close_ok or close_result == false then
+    vim.uv.fs_unlink(breaker)
+    return false
+  end
   local current = vim.uv.fs_stat(lock)
   -- The inode alone is not enough: Linux reuses a freed inode number at once,
   -- so a fresh lock can carry the stale one's number. A fresh lock is also not
@@ -446,14 +500,14 @@ local function acquire_lock(path)
   for _ = 1, lock_attempts do
     local handle = vim.uv.fs_open(lock, "wx", 384)
     if handle then
-      local owner = lock_owner_prefix .. tostring(vim.fn.getpid()) .. "\n"
+      local owner = lock_owner_line()
       local written, write_error = vim.uv.fs_write(handle, owner, -1)
-      local closed, close_error = pcall(vim.uv.fs_close, handle)
-      if written and closed then
+      local close_ok, close_result = pcall(vim.uv.fs_close, handle)
+      if written == #owner and close_ok and close_result ~= false then
         return lock
       end
       vim.uv.fs_unlink(lock)
-      return nil, write_error or close_error or "could not initialize the sidecar lock"
+      return nil, write_error or (not close_ok and close_result) or "could not initialize the sidecar lock"
     end
     local info = vim.uv.fs_stat(lock)
     -- Left behind by an instance that died before releasing it.
