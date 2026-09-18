@@ -63,12 +63,6 @@ MUTATIONS = [
         "if false then",
     ),
     (
-        "orphaned exception off",
-        "lua/contextmark/render.lua",
-        'return status == "orphaned" and status or "mismatch"',
-        'return "mismatch"',
-    ),
-    (
         "sync clamp off",
         "lua/contextmark/render.lua",
         "local first = clamp_line(start_line)",

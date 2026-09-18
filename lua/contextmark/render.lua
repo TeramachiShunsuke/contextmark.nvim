@@ -94,12 +94,6 @@ local function severity_of(status)
   return util.is_warning_status(status) and "stale" or "ok"
 end
 
--- What a note's status becomes once the file it points at is judged to be a
--- different file. An emptied file is not a different file, so it keeps its own.
-local function replaced_status(status)
-  return status == "orphaned" and status or "mismatch"
-end
-
 -- The extmark has collapsed onto nothing, because the noted text was deleted.
 -- Recapturing here would store an empty excerpt and leave the note pointing at
 -- a range that says nothing about what it was written for.
@@ -262,7 +256,7 @@ function M.render(bufnr)
         -- line at the very same position -- but it is not this note's text.
         -- Place it where it was recorded, not on the replacement's match: sync
         -- and the hover both read the extmark.
-        status = replaced_status(status)
+        status = "mismatch"
         local count = math.max(#lines, 1)
         start_line = math.max(1, math.min(comment.anchor.start_line, count))
         end_line = math.max(start_line, math.min(comment.anchor.end_line or start_line, count))
@@ -412,7 +406,7 @@ function M.sync(bufnr)
           -- This is keyed on the file's identity, NOT on the note's status: a
           -- note that still resolves cleanly inside a replacement file needs the
           -- same protection.
-          stored.status = replaced_status(stored.status)
+          stored.status = "mismatch"
         elseif degenerate or util.is_warning_status(stored.status) then
           -- Either the extmark collapsed onto nothing (the noted text was
           -- deleted), or the note was already unresolved when it was placed, so
