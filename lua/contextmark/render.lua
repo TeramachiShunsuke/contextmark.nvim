@@ -17,22 +17,52 @@ end
 -- hashed the whole document several times for one user action.
 local verdicts = {}
 
+-- Below this share of the recorded sample, the file is recognised only by what
+-- every document of its kind carries: front matter, headings, a licence block.
+-- That is not enough on its own, so the notes get a say (see notes_recognize).
+local weak_evidence = 0.5
+
 local function file_verdict(bufnr, root, relative, lines)
   local stored = store.fingerprint(root, relative)
   local tick = vim.b[bufnr].changedtick
   local cached = verdicts[bufnr]
   if cached and cached.tick == tick and cached.relative == relative and cached.stored == stored then
-    return cached.verdict, cached.fingerprint
+    return cached.verdict, cached.fingerprint, cached.share
   end
-  local verdict, fingerprint = identity.compare(stored, lines)
+  local verdict, fingerprint, share = identity.compare(stored, lines)
   verdicts[bufnr] = {
     tick = tick,
     relative = relative,
     stored = stored,
     verdict = verdict,
     fingerprint = fingerprint,
+    share = share,
   }
-  return verdict, fingerprint
+  return verdict, fingerprint, share
+end
+
+-- Does any note still find its own surroundings here? A document written from
+-- the same template as this one shares its boilerplate, so the file-wide check
+-- can call it the same file; what it cannot share is the text each note was
+-- written next to.
+--
+-- The note's own excerpt does not count. It is often the very boilerplate the
+-- two documents share -- a note on "## Decision" resolves in every ADR ever
+-- written from that template -- and whether the excerpt resolves is what
+-- anchor.resolve() already reports.
+local function notes_recognize(comments, lines)
+  local present = identity.line_set(lines)
+  for _, comment in ipairs(comments) do
+    local stored = comment.anchor
+    for _, group in ipairs({ stored.before, stored.after }) do
+      for _, line in ipairs(type(group) == "table" and group or {}) do
+        if identity.contains(present, line) then
+          return true
+        end
+      end
+    end
+  end
+  return false
 end
 
 -- Reported once per root: a sidecar that cannot be written means the notes just
@@ -196,8 +226,19 @@ function M.render(bufnr)
       break
     end
   end
+  local share
   if #comments > 0 then
-    verdict, fingerprint = file_verdict(bufnr, root, relative, lines)
+    verdict, fingerprint, share = file_verdict(bufnr, root, relative, lines)
+  end
+  if
+    verdict == "same"
+    and share
+    and share < weak_evidence
+    and not notes_recognize(comments, lines)
+  then
+    -- Recognised only by boilerplate, and not one note found the text it was
+    -- written beside: a sibling document has taken this file's place.
+    verdict = "replaced"
   end
   local replaced = verdict == "replaced"
 

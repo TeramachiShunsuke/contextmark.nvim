@@ -914,6 +914,120 @@ test("flags a note whose closed file was replaced behind Neovim's back", functio
   equal(stored.anchor.status, "exact")
 end)
 
+-- Two documents from one template: same front matter, same headings, different
+-- subject matter. Every line they share is boilerplate.
+local function adr(subject, decision)
+  local lines = { "---", "status: accepted", "date: 2026-01-01", "---", "" }
+  lines[#lines + 1] = "# " .. subject
+  lines[#lines + 1] = ""
+  for _, section in ipairs({ "Context", "Decision", "Consequences" }) do
+    lines[#lines + 1] = "## " .. section
+    lines[#lines + 1] = ""
+    if section == "Decision" then
+      lines[#lines + 1] = decision
+    else
+      for index = 1, 4 do
+        lines[#lines + 1] = ("%s of %s, point %d."):format(section, subject, index)
+      end
+    end
+    lines[#lines + 1] = ""
+  end
+  return lines
+end
+
+test("flags a note when a template sibling takes its file's place", function()
+  local root, store = fixture({ ["docs/adr-001.md"] = adr("PostgreSQL", "We adopt PostgreSQL.") })
+  local render = require("contextmark.render")
+  local util = require("contextmark.util")
+  local lines = vim.fn.readfile(root .. "/docs/adr-001.md")
+  local decision_at
+  for index, line in ipairs(lines) do
+    if line == "## Decision" then
+      decision_at = index
+    end
+  end
+
+  -- A note on a heading the template gives every document.
+  local now = util.now()
+  equal(
+    store.add(root, {
+      id = "cm-adr",
+      file = "docs/adr-001.md",
+      filetype = "markdown",
+      body = "why this decision",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(lines, decision_at, decision_at, 2),
+    }),
+    true
+  )
+  local identity = require("contextmark.identity")
+  store.set_fingerprint(root, "docs/adr-001.md", identity.fingerprint(lines))
+  equal(store.save(root), true)
+
+  -- The other ADR is written over it. It keeps the front matter and headings,
+  -- so the file alone looks like the same document being edited.
+  vim.fn.writefile(adr("OAuth", "We adopt OAuth."), root .. "/docs/adr-001.md")
+  vim.cmd.edit(root .. "/docs/adr-001.md")
+  local bufnr = vim.api.nvim_get_current_buf()
+  render.render(bufnr)
+  local comment = store.list(root, "docs/adr-001.md")[1]
+  local baseline = store.fingerprint(root, "docs/adr-001.md")
+  vim.cmd.enew({ bang = true })
+
+  -- The note's own surroundings are gone, so the file is not the one it was
+  -- written against, however much boilerplate the two share.
+  equal(comment.anchor.status, "mismatch")
+  equal(baseline.digest, identity.fingerprint(lines).digest)
+end)
+
+test("does not flag a heavy rewrite that left the note's surroundings", function()
+  local root, store = fixture({ ["docs/adr-001.md"] = adr("PostgreSQL", "We adopt PostgreSQL.") })
+  local render = require("contextmark.render")
+  local identity = require("contextmark.identity")
+  local util = require("contextmark.util")
+  local lines = vim.fn.readfile(root .. "/docs/adr-001.md")
+  local decision_at
+  for index, line in ipairs(lines) do
+    if line == "## Decision" then
+      decision_at = index
+    end
+  end
+  local now = util.now()
+  equal(
+    store.add(root, {
+      id = "cm-adr-edit",
+      file = "docs/adr-001.md",
+      filetype = "markdown",
+      body = "why this decision",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(lines, decision_at, decision_at, 2),
+    }),
+    true
+  )
+  store.set_fingerprint(root, "docs/adr-001.md", identity.fingerprint(lines))
+  equal(store.save(root), true)
+
+  -- The author rewrites everything except the note's own surroundings.
+  local edited = {}
+  for index, line in ipairs(lines) do
+    local near = index >= decision_at - 2 and index <= decision_at + 2
+    edited[index] = near and line
+      or (line:match("%S") and ("rewritten line %d"):format(index) or "")
+  end
+  vim.fn.writefile(edited, root .. "/docs/adr-001.md")
+  vim.cmd.edit(root .. "/docs/adr-001.md")
+  local bufnr = vim.api.nvim_get_current_buf()
+  render.render(bufnr)
+  local comment = store.list(root, "docs/adr-001.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  -- Rewriting a document is what this plugin is for. The note found the text it
+  -- was written beside, so this is still its file.
+  equal(comment.anchor.status, "exact")
+end)
+
 test("samples the whole document, not just its opening", function()
   local identity = require("contextmark.identity")
   -- 60 significant lines. A stepped walk used to spend the whole sample inside

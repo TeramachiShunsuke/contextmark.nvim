@@ -313,6 +313,24 @@ MUTATIONS = [
         "      verdicts[relative] = false\n        and type(lines) == \"table\"",
     ),
     (
+        "notes not consulted on weak file evidence",
+        "lua/contextmark/render.lua",
+        "    and not notes_recognize(comments, lines)\n",
+        "    and false\n",
+    ),
+    (
+        "notes never recognize their surroundings",
+        "lua/contextmark/render.lua",
+        "        if identity.contains(present, line) then\n          return true",
+        "        if false then\n          return true",
+    ),
+    (
+        "note excerpt counted as its surroundings",
+        "lua/contextmark/render.lua",
+        "    for _, group in ipairs({ stored.before, stored.after }) do",
+        "    for _, group in ipairs({ stored.excerpt, stored.before, stored.after }) do",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",

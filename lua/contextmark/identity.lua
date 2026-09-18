@@ -169,15 +169,19 @@ end
 -- "unknown" means no conclusion, which is the state of every note written
 -- before fingerprints existed and of every file too short to judge; callers
 -- must treat it as "do not accuse this file" rather than as a replacement.
--- How many of `stored` are still present, as a fraction of `stored`.
-local function survives(stored, present)
+-- How many of `stored` are still present.
+local function hits_in(stored, present)
   local hits = 0
   for _, entry in ipairs(stored) do
     if present[entry] then
       hits = hits + 1
     end
   end
-  return hits * survival_denominator >= #stored
+  return hits
+end
+
+local function survives(stored, present)
+  return hits_in(stored, present) * survival_denominator >= #stored
 end
 
 local function set_of(values)
@@ -188,13 +192,17 @@ local function set_of(values)
   return result
 end
 
+-- Returns "same" / "replaced" / "unknown", the fingerprint of `lines`, and how
+-- much of the recorded sample survived (nil when nothing was decided). The
+-- caller uses that share to tell a file it barely recognises -- two documents
+-- from one template share their boilerplate -- from one it plainly knows.
 function M.compare(stored, lines)
   local current, body, paragraphs = describe(lines)
   if type(stored) ~= "table" or type(stored.sample) ~= "table" then
     return "unknown", current
   end
   if stored.digest and stored.digest == current.digest then
-    return "same", current
+    return "same", current, 1
   end
 
   local total = #stored.sample
@@ -202,8 +210,9 @@ function M.compare(stored, lines)
     return "unknown", current
   end
 
-  if survives(stored.sample, set_of(body)) then
-    return "same", current
+  local hits = hits_in(stored.sample, set_of(body))
+  if hits * survival_denominator >= total then
+    return "same", current, hits / total
   end
 
   -- No line survived, which is also what re-wrapping the whole file looks like.
@@ -215,9 +224,25 @@ function M.compare(stored, lines)
     and #stored.paragraphs >= paragraph_sample_floor
     and survives(stored.paragraphs, set_of(paragraphs))
   then
-    return "same", current
+    return "same", current, 1
   end
-  return "replaced", current
+  return "replaced", current, hits / total
+end
+
+-- The canonical lines of `lines`, for asking whether a particular line is still
+-- in the file. Shares the per-line digest cache with everything else here.
+function M.line_set(lines)
+  local present = {}
+  for _, line in ipairs(lines) do
+    if line:match("%S") then
+      present[line_digest(line)] = true
+    end
+  end
+  return present
+end
+
+function M.contains(present, line)
+  return type(line) == "string" and line:match("%S") ~= nil and present[line_digest(line)] == true
 end
 
 return M
