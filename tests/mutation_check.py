@@ -424,8 +424,8 @@ MUTATIONS = [
     (
         "relocate accepts any file",
         "lua/contextmark/init.lua",
-        '              and identity.compare(entry.stored, lines) == "same"',
-        "              and true",
+        '              local verdict, _, share = identity.compare(entry.stored, lines)',
+        '              local verdict, _, share = "same", nil, 1',
     ),
     (
         "move destination not mapped into the root",
