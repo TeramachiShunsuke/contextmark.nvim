@@ -2778,6 +2778,74 @@ test("clears a breaker left by a waiter that died while clearing", function()
   equal(leftovers, 0)
 end)
 
+test("does not remove a fresh breaker acquired after a stale breaker check", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  local lock = store.path(root) .. ".lock"
+  local breaker = lock .. ".break"
+  vim.fn.writefile({}, lock)
+  vim.fn.writefile({ "pid:0" }, breaker)
+  local stale = os.time() - 60
+  vim.uv.fs_utime(lock, stale, stale)
+  vim.uv.fs_utime(breaker, stale, stale)
+
+  local original_open = vim.uv.fs_open
+  local original_stat = vim.uv.fs_stat
+  local original_unlink = vim.uv.fs_unlink
+  local swapped = false
+  local breaker_stats = 0
+  local ok, saved = xpcall(function()
+    vim.uv.fs_open = function(path, flags, mode)
+      if path == breaker and flags == "wx" then
+        return nil
+      end
+      return original_open(path, flags, mode)
+    end
+    vim.uv.fs_stat = function(path, ...)
+      local info = original_stat(path, ...)
+      if path == breaker then
+        breaker_stats = breaker_stats + 1
+        if breaker_stats == 2 then
+          original_unlink(breaker)
+          local handle = assert(original_open(breaker, "wx", 384))
+          local owner = "pid:" .. tostring(vim.fn.getpid()) .. "\n"
+          assert(vim.uv.fs_write(handle, owner, -1) == #owner)
+          assert(vim.uv.fs_close(handle))
+          info = original_stat(path, ...)
+        end
+      end
+      return info
+    end
+    vim.uv.fs_unlink = function(path, ...)
+      if path == breaker and not swapped then
+        swapped = true
+        original_unlink(breaker)
+        local handle = assert(original_open(breaker, "wx", 384))
+        local owner = "pid:" .. tostring(vim.fn.getpid()) .. "\n"
+        assert(vim.uv.fs_write(handle, owner, -1) == #owner)
+        assert(vim.uv.fs_close(handle))
+      end
+      return original_unlink(path, ...)
+    end
+    return store.save(root)
+  end, function(error_message)
+    return error_message
+  end)
+  vim.uv.fs_open = original_open
+  vim.uv.fs_stat = original_stat
+  vim.uv.fs_unlink = original_unlink
+  if not ok then
+    error(saved, 0)
+  end
+  local breaker_survivor = vim.uv.fs_stat(breaker)
+  vim.uv.fs_unlink(lock)
+  vim.uv.fs_unlink(breaker)
+
+  equal(saved, false)
+  equal(swapped, false)
+  assert(breaker_survivor, "the fresh breaker was removed by an outdated stale check")
+end)
+
 test("does not clear a stale-looking lock whose owner is still alive", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   add_note(root, "docs/a.md", marked_at, marked_at)

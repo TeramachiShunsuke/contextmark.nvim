@@ -467,8 +467,17 @@ local function clear_stale_lock(lock, seen)
   if not handle then
     -- Another waiter is clearing it. A breaker is held for microseconds, so a
     -- stale one was left by an instance that died mid-clear.
-    if is_stale(vim.uv.fs_stat(breaker), breaker) then
-      vim.uv.fs_unlink(breaker)
+    local seen_breaker = vim.uv.fs_stat(breaker)
+    if seen_breaker and is_stale(seen_breaker, breaker) then
+      local current_breaker = vim.uv.fs_stat(breaker)
+      if current_breaker
+        and current_breaker.ino == seen_breaker.ino
+        and current_breaker.mtime.sec == seen_breaker.mtime.sec
+        and current_breaker.mtime.nsec == seen_breaker.mtime.nsec
+        and is_stale(current_breaker, breaker)
+      then
+        vim.uv.fs_unlink(breaker)
+      end
     end
     return false
   end
