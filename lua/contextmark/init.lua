@@ -623,7 +623,7 @@ local function settle_rename(bufnr)
   -- Otherwise this is two unrelated events that happen to line up, and moving
   -- the notes would overwrite the destination's own identity.
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  if identity.compare(store.fingerprint(root, before.file), lines) == "replaced" then
+  if render.judge(root, before.file, lines, store.list(root, before.file)) == "replaced" then
     renaming[bufnr] = nil
     return
   end

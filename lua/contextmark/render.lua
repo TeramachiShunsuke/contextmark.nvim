@@ -56,11 +56,13 @@ end
 local function notes_recognize(comments, lines)
   for _, comment in ipairs(comments) do
     local stored = comment.anchor
-    local start_line, end_line
+    local start_line, end_line, status
     if stored.status ~= "mismatch" then
-      start_line, end_line = anchor.resolve(lines, stored)
+      start_line, end_line, status = anchor.resolve(lines, stored)
     end
-    if start_line then
+    -- A "stale" position is only the old line number, and a sibling from the
+    -- same template has the same heading right above that line.
+    if start_line and (status == "exact" or status == "moved") then
       local before = type(stored.before) == "table" and stored.before or {}
       for index, line in ipairs(before) do
         if identity.same_line(line, lines[start_line - #before - 1 + index]) then

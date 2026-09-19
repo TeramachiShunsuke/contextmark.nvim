@@ -369,8 +369,20 @@ MUTATIONS = [
     (
         "flagged notes vote for the file",
         "lua/contextmark/render.lua",
-        "    if stored.status ~= \"mismatch\" then\n      start_line, end_line = anchor.resolve(lines, stored)",
-        "    if true then\n      start_line, end_line = anchor.resolve(lines, stored)",
+        "    if stored.status ~= \"mismatch\" then\n      start_line, end_line, status = anchor.resolve(lines, stored)",
+        "    if true then\n      start_line, end_line, status = anchor.resolve(lines, stored)",
+    ),
+    (
+        "a stale fallback position vouches for the file",
+        "lua/contextmark/render.lua",
+        "    if start_line and (status == \"exact\" or status == \"moved\") then",
+        "    if start_line then",
+    ),
+    (
+        "rename trusts the file alone",
+        "lua/contextmark/init.lua",
+        "  if render.judge(root, before.file, lines, store.list(root, before.file)) == \"replaced\" then",
+        "  if identity.compare(store.fingerprint(root, before.file), lines) == \"replaced\" then",
     ),
     (
         "note added to a replaced file born healthy",

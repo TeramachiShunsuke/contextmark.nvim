@@ -3263,6 +3263,65 @@ test("expands only a leading ~ in :ContextMarkMove paths", function()
   equal(moved, 1)
 end)
 
+test("does not let a note's fallback position vouch for a template sibling", function()
+  local original = adr("PostgreSQL", "We adopt PostgreSQL.")
+  local root, store = fixture({ ["docs/adr-001.md"] = original })
+  local render = require("contextmark.render")
+  local identity = require("contextmark.identity")
+  local util = require("contextmark.util")
+  local decided_at
+  for index, line in ipairs(original) do
+    if line == "We adopt PostgreSQL." then
+      decided_at = index
+    end
+  end
+  -- A note on the decision itself, whose surroundings are the template's
+  -- "## Decision" heading.
+  local now = util.now()
+  equal(
+    store.add(root, {
+      id = "cm-decision",
+      file = "docs/adr-001.md",
+      filetype = "markdown",
+      body = "why PostgreSQL",
+      created_at = now,
+      updated_at = now,
+      anchor = anchor.capture(original, decided_at, decided_at, 2),
+    }),
+    true
+  )
+  store.set_fingerprint(root, "docs/adr-001.md", identity.fingerprint(original))
+  equal(store.save(root), true)
+
+  -- In the sibling the decision is gone, so the note falls back to its old line,
+  -- and that line sits under the same heading in every ADR.
+  vim.fn.writefile(adr("OAuth", "We adopt OAuth."), root .. "/docs/adr-001.md")
+  vim.cmd.edit(root .. "/docs/adr-001.md")
+  render.render(vim.api.nvim_get_current_buf())
+  local comment = store.list(root, "docs/adr-001.md")[1]
+  vim.cmd.enew({ bang = true })
+
+  equal(comment.anchor.status, "mismatch")
+end)
+
+test("does not carry notes onto a template sibling through a rename", function()
+  local original = adr("PostgreSQL", "We adopt PostgreSQL.")
+  local root, store = fixture({ ["docs/adr-001.md"] = original })
+  adr_note(root, store, original)
+
+  -- The buffer is overwritten with another ADR, then renamed and the old file
+  -- removed: the name changed, but the text is no longer the note's file.
+  vim.cmd.edit(root .. "/docs/adr-001.md")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, adr("OAuth", "We adopt OAuth."))
+  vim.cmd.file(root .. "/docs/adr-002.md")
+  equal(vim.fn.delete(root .. "/docs/adr-001.md"), 0)
+  vim.cmd.write()
+  local moved = #store.list(root, "docs/adr-002.md")
+  vim.cmd.enew({ bang = true })
+
+  equal(moved, 0)
+end)
+
 local failures = 0
 for _, item in ipairs(tests) do
   local ok, error_message = pcall(item.callback)
