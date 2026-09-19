@@ -259,6 +259,42 @@ MUTATIONS = [
         "",
     ),
     (
+        "path normalization expands $VAR",
+        "lua/contextmark/util.lua",
+        "  return vim.fs.normalize(path, { expand_env = false })",
+        "  return vim.fs.normalize(path)",
+    ),
+    (
+        "move arguments run through expand()",
+        "lua/contextmark/init.lua",
+        "  local expanded = value\n",
+        "  local expanded = vim.fn.expand(value)\n",
+    ),
+    (
+        "adoption joins keys through symlinks",
+        "lua/contextmark/init.lua",
+        "    local here = util.literal_absolute_path(root, relative)",
+        "    local here = util.absolute_path(root, relative)",
+    ),
+    (
+        "late edit replaces the whole note",
+        "lua/contextmark/store.lua",
+        "      current.body = comment.body\n      current.updated_at = comment.updated_at",
+        "      state.comments[_] = comment",
+    ),
+    (
+        "flock never taken",
+        "lua/contextmark/store.lua",
+        "    if ffi.C.flock(fd, LOCK_EX + LOCK_NB) == 0 then",
+        "    if true then",
+    ),
+    (
+        "lock file unlinked on release",
+        "lua/contextmark/store.lua",
+        "  bases[root] = vim.deepcopy(state)\n  release_lock(lock)\n",
+        "  bases[root] = vim.deepcopy(state)\n  release_lock(lock)\n  vim.uv.fs_unlink(path .. \".lock\")\n",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",
@@ -267,7 +303,7 @@ MUTATIONS = [
     (
         "save lock off",
         "lua/contextmark/store.lua",
-        "  local lock = acquire_lock(path)\n  if not lock then",
+        "  local lock, lock_error = acquire_lock(path)\n  if not lock then",
         "  local lock = path .. \".lock\"\n  if false then",
     ),
     (
@@ -310,7 +346,7 @@ MUTATIONS = [
     (
         "move destination not mapped into the root",
         "lua/contextmark/init.lua",
-        "  return util.relative_path(util.absolute_path(root, expanded), root)",
+        "  return util.relative_path(util.literal_absolute_path(root, expanded), root)",
         "  return expanded",
     ),
     (
@@ -370,8 +406,8 @@ MUTATIONS = [
     (
         "even sampling replaced by a stepped walk",
         "lua/contextmark/identity.lua",
-        "  for step = 1, taken do\n    local index = 1 + math.floor((step - 1) * (#body - 1) / (taken - 1) + 0.5)\n    sample[#sample + 1] = digest(body[index])\n  end",
-        "  local stride = math.max(1, math.floor(#body / sample_size))\n  for index = 1, #body, stride do\n    sample[#sample + 1] = digest(body[index])\n    if #sample >= taken then\n      break\n    end\n  end",
+        "  for step = 1, taken do\n    local index = 1 + math.floor((step - 1) * (#body - 1) / (taken - 1) + 0.5)\n    sample[#sample + 1] = body[index]\n  end",
+        "  local stride = math.max(1, math.floor(#body / sample_size))\n  for index = 1, #body, stride do\n    sample[#sample + 1] = body[index]\n    if #sample >= taken then\n      break\n    end\n  end",
     ),
     (
         "tiny samples decide again",

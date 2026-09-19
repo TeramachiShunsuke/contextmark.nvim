@@ -128,14 +128,19 @@ local function as_relative(root, value)
   if not value or value == "" then
     return nil
   end
-  local expanded = vim.fn.expand(value)
+  -- Only a leading "~" is expanded. vim.fn.expand() also rewrote "$VAR", "#",
+  -- "<cword>" and "{x,y}", all of which can appear in a real file name.
+  local expanded = value
+  if (value == "~" or value:sub(1, 2) == "~/") and vim.env.HOME then
+    expanded = vim.env.HOME .. value:sub(2)
+  end
   if expanded:sub(1, 1) == "/" then
     return util.relative_path(expanded, root)
   end
   -- A relative argument is still mapped through the root rather than trusted:
   -- "../elsewhere.md" would otherwise become a key no buffer can ever match,
   -- leaving the notes stored but invisible.
-  return util.relative_path(util.absolute_path(root, expanded), root)
+  return util.relative_path(util.literal_absolute_path(root, expanded), root)
 end
 
 -- The note keys of the current project, for command completion.
@@ -464,7 +469,9 @@ local function adoption_plan(entry, root)
       return cache[relative] or nil
     end
     local mapped = false
-    local here = util.absolute_path(root, relative)
+    -- Joined literally, so a key on a link that points outside the project
+    -- still counts as inside it.
+    local here = util.literal_absolute_path(root, relative)
     if entry.missing then
       -- The project moved away wholesale. Its paths still hold, but only for
       -- files that exist here, and only while they stay inside this root: a

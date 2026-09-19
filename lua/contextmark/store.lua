@@ -222,7 +222,11 @@ local function legacy_state_paths(root)
       local state = read_state_file(path)
       local recorded = state and state.root
       local resolved = type(recorded) == "string" and vim.uv.fs_realpath(recorded)
-      if resolved and resolved ~= recorded and vim.fs.normalize(resolved) == root then
+      if
+        resolved
+        and resolved ~= recorded
+        and vim.fs.normalize(resolved, { expand_env = false }) == root
+      then
         result[#result + 1] = { path = path, state = state }
       end
     end
@@ -341,29 +345,65 @@ end
 
 local lock_attempts = 40
 local lock_wait_ms = 10
-local lock_stale_seconds = 5
 
 -- The whole read-modify-write has to be exclusive. The atomic rename only
 -- guarantees that no reader sees a half-written file; it does not stop two
 -- instances from each reading, merging and writing, with the later rename
 -- discarding the earlier one's notes.
+--
+-- The lock is the kernel's flock() on <sidecar>.lock, not the file's existence.
+-- A lock made of "the file exists" has to be cleared by name when its owner
+-- dies, and every way of checking-then-removing it by name leaves a window in
+-- which another instance's live lock is removed: a second lock to serialize the
+-- clearing only moves the same window onto that second lock. flock() is held
+-- by the open file and released by the kernel when the process exits or
+-- crashes, so there is nothing stale to judge and nothing to remove. The file
+-- itself is never unlinked: unlinking a flock()ed file lets one instance lock
+-- the old inode while another creates and locks a new one.
+local has_ffi, ffi = pcall(require, "ffi")
+local LOCK_EX, LOCK_NB, LOCK_UN = 2, 4, 8
+local flock_available = has_ffi
+  and pcall(ffi.cdef, "int flock(int fd, int operation);")
+  and pcall(function()
+    return ffi.C.flock
+  end)
+
 local function acquire_lock(path)
-  local lock = path .. ".lock"
-  for _ = 1, lock_attempts do
-    local handle = vim.uv.fs_open(lock, "wx", 384)
-    if handle then
-      vim.uv.fs_close(handle)
-      return lock
-    end
-    local info = vim.uv.fs_stat(lock)
-    if info and os.time() - info.mtime.sec > lock_stale_seconds then
-      -- Left behind by an instance that died before releasing it.
-      vim.uv.fs_unlink(lock)
-    else
-      vim.uv.sleep(lock_wait_ms)
-    end
+  if not flock_available then
+    -- No flock() (Windows, or a Neovim built without LuaJIT): save without
+    -- cross-instance locking, as before locking existed, rather than refuse
+    -- every save.
+    return true
   end
+  local fd, open_error = vim.uv.fs_open(path .. ".lock", "a", 384)
+  if not fd then
+    return nil, "could not open the sidecar lock: " .. tostring(open_error)
+  end
+  for _ = 1, lock_attempts do
+    if ffi.C.flock(fd, LOCK_EX + LOCK_NB) == 0 then
+      return fd
+    end
+    vim.uv.sleep(lock_wait_ms)
+  end
+  vim.uv.fs_close(fd)
   return nil
+end
+
+local function release_lock(lock)
+  if type(lock) == "number" then
+    ffi.C.flock(lock, LOCK_UN)
+    vim.uv.fs_close(lock)
+  end
+end
+
+-- Holds the sidecar lock of `root` the way another Neovim instance would, and
+-- returns a function that releases it. For tests of the contention paths.
+function M.hold_lock(root)
+  local lock = acquire_lock(state_path(root))
+  assert(lock, "could not take the sidecar lock")
+  return function()
+    release_lock(lock)
+  end
 end
 
 local function write_state(state, path)
@@ -406,11 +446,11 @@ function M.save(root)
   end
   vim.fn.mkdir(storage_dir(), "p")
 
-  local lock = acquire_lock(path)
+  local lock, lock_error = acquire_lock(path)
   if not lock then
     -- Refuse rather than overwrite: another instance is mid-write, and our copy
     -- does not include whatever it is about to store.
-    return false, "sidecar is locked by another Neovim instance"
+    return false, lock_error or "sidecar is locked by another Neovim instance"
   end
 
   -- Fold in anything written between load() and taking the lock. A second
@@ -426,21 +466,21 @@ function M.save(root)
     elseif reason ~= "absent" then
       unreadable[root] = reason
       stamps[root] = stamp
-      vim.uv.fs_unlink(lock)
+      release_lock(lock)
       return refuse()
     end
   end
 
   local ok, error_message = write_state(state, path)
   if not ok then
-    vim.uv.fs_unlink(lock)
+    release_lock(lock)
     return false, error_message
   end
   -- Stat before releasing the lock, so a writer waiting on it cannot slip a
   -- change in that we would then record as already read.
   stamps[root] = stamp_of(path)
   bases[root] = vim.deepcopy(state)
-  vim.uv.fs_unlink(lock)
+  release_lock(lock)
 
   if retiring[root] then
     -- Keep the old files for recovery, but out of the *.json scan.
@@ -468,11 +508,16 @@ function M.add(root, comment)
   return M.save(root)
 end
 
+-- Applies an edit of the note's text. Only the body and its timestamp are taken
+-- from `comment`: the caller held it while waiting for input, and a move,
+-- re-anchor or reload in the meantime would otherwise be reverted by its stale
+-- `file` and `anchor`.
 function M.update(root, comment)
   local state = load(root)
-  for index, current in ipairs(state.comments) do
+  for _, current in ipairs(state.comments) do
     if current.id == comment.id then
-      state.comments[index] = comment
+      current.body = comment.body
+      current.updated_at = comment.updated_at
       return M.save(root)
     end
   end

@@ -1703,22 +1703,33 @@ end)
 test("refuses to save while another instance holds the lock", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
 
-  local handle = assert(vim.uv.fs_open(lock, "wx", 384), "could not take the lock")
-  vim.uv.fs_close(handle)
+  local release = store.hold_lock(root)
   store.set_fingerprint(root, "docs/a.md", { digest = "local-only", sample = {} })
   local blocked, reason = store.save(root)
-
-  -- A lock left behind by a crashed instance must not block writes forever.
-  local stale = os.time() - 600
-  vim.uv.fs_utime(lock, stale, stale)
-  local reclaimed = store.save(root)
-  vim.uv.fs_unlink(lock)
+  release()
+  local after_release = store.save(root)
 
   equal(blocked, false)
   assert(reason and reason:find("locked", 1, true), "the reason did not mention the lock")
-  equal(reclaimed, true)
+  equal(after_release, true)
+end)
+
+test("a lock file left by a crashed instance does not block saves", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  -- What a crash leaves: the lock file, with nobody holding flock() on it. The
+  -- previous file-existence lock had to judge this "stale" and clear it by name,
+  -- which could remove another instance's live lock.
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({ "pid:999999" }, lock)
+
+  local saved = store.save(root)
+  local still_there = vim.uv.fs_stat(lock) ~= nil
+
+  equal(saved, true)
+  -- Never unlinked: removing a flock()ed file lets two instances lock two inodes.
+  equal(still_there, true)
 end)
 
 test("does not match an unrelated file through a repeated line", function()
@@ -2215,10 +2226,9 @@ test("keeps another instance's edits and deletions after a failed save", functio
 
   -- A save that fails (here: the sidecar is locked) used to pin the cache, so
   -- this instance never saw later changes and its next save wrote them away.
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({}, lock)
+  local release = store.hold_lock(root)
   local locked = store.add(root, plain_note("cm-a1"))
-  vim.uv.fs_unlink(lock)
+  release()
   equal(locked, false)
 
   with_other_instance(function(other)
@@ -2245,10 +2255,9 @@ end)
 test("refuses to overwrite a sidecar that became unreadable after a failed save", function()
   local root, store = fixture({ ["note.md"] = { "hello" } })
   equal(store.add(root, plain_note("cm-x")), true)
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({}, lock)
+  local release = store.hold_lock(root)
   equal(store.add(root, plain_note("cm-a1")), false)
-  vim.uv.fs_unlink(lock)
+  release()
 
   -- A newer contextmark rewrote the sidecar in the meantime.
   local newer = vim.json.encode({ version = 2, root = root, notes = { { id = "v2" } } })
@@ -2278,10 +2287,9 @@ test("does not bring back a deleted legacy note when the migration save failed",
   vim.fn.writefile({ encoded }, store.path(legacy_root))
 
   -- The save attempted during migration fails, so the legacy file stays.
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({}, lock)
+  local release = store.hold_lock(root)
   equal(#store.list(root), 1)
-  vim.uv.fs_unlink(lock)
+  release()
   equal(vim.uv.fs_stat(store.path(legacy_root)) ~= nil, true)
 
   -- The first save that does succeed must retire it, or the next session merges
@@ -2597,6 +2605,100 @@ test("keeps a mismatched note's line past the end of a shorter replacement", fun
   -- Clamped for display only. Writing the clamped line back would lose where
   -- the note was in its own file.
   equal(comment.anchor.start_line, noted_at)
+end)
+
+test("keys a file whose name contains $VAR literally", function()
+  local name = "docs/cost$HOME.md"
+  local root, _, util = fixture({ [name] = document("Alpha") })
+  local path = root .. "/" .. name
+
+  -- vim.fs.normalize() expands environment variables by default, which turned
+  -- this key into "docs/cost/Users/<user>.md": no buffer or file matched it.
+  equal(util.relative_path(path, root), name)
+  equal(util.absolute_path(root, name), path)
+  equal(vim.fn.filereadable(util.absolute_path(root, name)), 1)
+end)
+
+test("moves and adopts notes on a symlink that points outside the project", function()
+  local root, store, util = fixture({ ["notes/todo.md"] = document("Alpha") })
+  local plugin = require("contextmark")
+  local outside = util.normalize(vim.fn.tempname())
+  vim.fn.mkdir(outside, "p")
+  vim.fn.writefile(document("Linked"), outside .. "/x.md")
+  assert(vim.uv.fs_symlink(outside .. "/x.md", root .. "/notes/alias.md"))
+
+  -- The link is keyed inside the project, as "notes/alias.md".
+  add_note(root, "notes/alias.md", marked_at, marked_at, "on the link")
+  vim.cmd.edit(root .. "/notes/todo.md")
+  plugin.move("notes/alias.md", "notes/renamed.md")
+  local moved = #store.list(root, "notes/renamed.md")
+
+  -- A project that moved away wholesale, with a note on the same link key.
+  local gone = vim.fn.tempname() .. "/moved-away"
+  local now = util.now()
+  equal(
+    store.add(gone, {
+      id = "cm-link-adopt",
+      file = "notes/alias.md",
+      filetype = "markdown",
+      body = "adopt me",
+      created_at = now,
+      updated_at = now,
+      anchor = { kind = "line", start_line = 1, end_line = 1, excerpt = { "# Linked" } },
+    }),
+    true
+  )
+  local candidates = plugin.adoption_candidates(root)
+  vim.cmd.enew({ bang = true })
+
+  -- Both used to resolve the key through the link to a path outside the root
+  -- and give up with "both paths must be inside".
+  equal(moved, 1)
+  equal(#candidates, 1)
+  equal(candidates[1].comments[1].file, "notes/alias.md")
+end)
+
+test("an edit saved late does not undo a move made meanwhile", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at, "before")
+
+  -- M.edit() holds the note while the float waits for input. A reload from
+  -- disk replaces the cached tables, so what it holds is a copy.
+  local held = vim.deepcopy(store.list(root, "docs/a.md")[1])
+  local ok = store.rekey(root, "docs/a.md", "docs/b.md")
+  equal(ok, true)
+
+  held.body = "after"
+  held.updated_at = "later"
+  equal(store.update(root, held), true)
+  local on_a, on_b = store.list(root, "docs/a.md"), store.list(root, "docs/b.md")
+
+  equal(#on_a, 0)
+  equal(#on_b, 1)
+  equal(on_b[1].body, "after")
+  equal(on_b[1].updated_at, "later")
+end)
+
+test("expands only a leading ~ in :ContextMarkMove paths", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  local plugin = require("contextmark")
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  vim.cmd.edit(root .. "/docs/a.md")
+
+  local original_home = vim.env.HOME
+  vim.env.HOME = vim.fs.dirname(root)
+  local ok, failure = pcall(function()
+    plugin.move("~/" .. vim.fs.basename(root) .. "/docs/a.md", "docs/cost$HOME.md")
+    plugin.move("docs/cost$HOME.md", "docs/#tag{x,y}.md")
+  end)
+  vim.env.HOME = original_home
+  local moved = #store.list(root, "docs/#tag{x,y}.md")
+  vim.cmd.enew({ bang = true })
+  if not ok then
+    error(failure, 0)
+  end
+
+  equal(moved, 1)
 end)
 
 local failures = 0

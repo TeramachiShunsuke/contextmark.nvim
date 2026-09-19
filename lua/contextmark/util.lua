@@ -21,6 +21,12 @@ local function without_trailing_slash(path)
   return trimmed
 end
 
+-- File names may contain "$", and vim.fs.normalize() expands environment
+-- variables by default: "cost$HOME.md" became a key no file or buffer matches.
+local function fs_normalize(path)
+  return vim.fs.normalize(path, { expand_env = false })
+end
+
 -- vim.fs.normalize() collapses interior duplicate slashes but keeps a leading
 -- "//", so joining onto the filesystem root needs its own case.
 local function join(parent, leaf)
@@ -32,7 +38,7 @@ end
 
 -- Absolute and slash-normalized, but NOT symlink-resolved.
 local function literal_path(path)
-  return without_trailing_slash(vim.fs.normalize(vim.fn.fnamemodify(path, ":p")))
+  return without_trailing_slash(fs_normalize(vim.fn.fnamemodify(path, ":p")))
 end
 
 local function normalize(path)
@@ -42,7 +48,7 @@ local function normalize(path)
   -- so this is what collapses "docs/alias.md" onto "docs/real.md".
   local real = vim.uv.fs_realpath(trimmed)
   if real then
-    return without_trailing_slash(vim.fs.normalize(real))
+    return without_trailing_slash(fs_normalize(real))
   end
 
   -- fs_realpath() fails on a path that does not exist: the normal case for a
@@ -61,7 +67,7 @@ local function normalize(path)
     table.insert(tail, 1, vim.fs.basename(current))
     local real_parent = vim.uv.fs_realpath(parent)
     if real_parent then
-      local resolved = without_trailing_slash(vim.fs.normalize(real_parent))
+      local resolved = without_trailing_slash(fs_normalize(real_parent))
       for _, segment in ipairs(tail) do
         resolved = join(resolved, segment)
       end
@@ -166,7 +172,15 @@ function M.relative_path(path, root)
 end
 
 function M.absolute_path(root, relative)
-  return normalize(join(without_trailing_slash(vim.fs.normalize(root)), relative))
+  return normalize(join(without_trailing_slash(fs_normalize(root)), relative))
+end
+
+-- The key joined onto the root as written, without resolving symlinks. Use it
+-- to decide whether a key belongs to the root: absolute_path() follows a link
+-- that points outside the project, so relative_path() of its result is nil
+-- even though the key itself is inside.
+function M.literal_absolute_path(root, relative)
+  return literal_path(join(without_trailing_slash(fs_normalize(root)), relative))
 end
 
 -- The single gate every note-owning code path goes through. Returns nil when the

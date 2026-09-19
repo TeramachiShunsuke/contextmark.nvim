@@ -43,3 +43,7 @@ luac.out
 # contextmark
 .nvimlog
 graphify-out/
+
+# Python bytecode from tests/mutation_check.py
+__pycache__/
+*.pyc
