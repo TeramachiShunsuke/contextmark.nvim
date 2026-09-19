@@ -61,7 +61,11 @@ function M.add()
   local captured =
     anchor.capture(lines, start_line, end_line, config.get().storage.context_lines, selected)
 
-  if identity.compare(store.fingerprint(root, relative), lines) == "replaced" then
+  if render.judge(root, relative, lines, store.list(root, relative), bufnr) == "replaced" then
+    -- Born flagged, like the notes already here: it is written against the
+    -- replacement, and an unflagged note would vouch for that file the next time
+    -- render asks the notes (see notes_recognize).
+    captured.status = "mismatch"
     -- Otherwise the new note is born carrying a "different file?" marker with
     -- no explanation: the flag belongs to the file, not to this note.
     vim.notify(
@@ -265,12 +269,14 @@ local function find_relocations(root, missing)
         local lines = util.read_buffer_or_file(util.absolute_path(root, name))
         if lines then
           for _, entry in ipairs(wanted) do
-            if
-              entry.extension == extension
-              and entry.relative ~= name
-              and identity.compare(entry.stored, lines) == "same"
-            then
-              table.insert(matches[entry.relative], name)
+            if entry.extension == extension and entry.relative ~= name then
+              local verdict, _, share = identity.compare(entry.stored, lines)
+              -- Only a strong match: a document that shares a licence paragraph
+              -- with the missing one is not where its notes went, and there are
+              -- no notes here to ask.
+              if verdict == "same" and share and share > identity.weak_share then
+                table.insert(matches[entry.relative], name)
+              end
             end
           end
         end
@@ -617,7 +623,7 @@ local function settle_rename(bufnr)
   -- Otherwise this is two unrelated events that happen to line up, and moving
   -- the notes would overwrite the destination's own identity.
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  if identity.compare(store.fingerprint(root, before.file), lines) == "replaced" then
+  if render.judge(root, before.file, lines, store.list(root, before.file)) == "replaced" then
     renaming[bufnr] = nil
     return
   end
@@ -745,19 +751,54 @@ local function announce_adoptable(bufnr)
   )
 end
 
+-- render() judges a file's identity when its buffer is open. A note whose file
+-- is closed has never been checked against what is on disk now, so a branch
+-- switch or an agent rewriting the file while it was closed reached the prompt
+-- as a healthy note quoting the replacement's text. Judge those here, once per
+-- file, and flag them for this prompt only: the sidecar still describes the
+-- note's own file, and the flag disappears by itself if the file comes back.
+local function flag_replaced_closed_files(root, comments)
+  local verdicts = {}
+  local result = {}
+  for index, comment in ipairs(comments) do
+    local relative = comment.file
+    if verdicts[relative] == nil then
+      local path = util.absolute_path(root, relative)
+      -- Strict lookup: vim.fn.bufnr() matches names as patterns, so asking for
+      -- "a.md" could find "a.md.bak" and skip the file that was replaced.
+      local open = util.buffer_for(path) ~= nil
+      local lines = not open
+        and store.fingerprint(root, relative)
+        and util.read_buffer_or_file(path)
+      -- A file that is gone is not a replacement: Relocate handles that.
+      verdicts[relative] = type(lines) == "table"
+        and render.judge(root, relative, lines, store.list(root, relative)) == "replaced"
+    end
+    if verdicts[relative] and comment.anchor.status ~= "mismatch" then
+      comment = vim.deepcopy(comment)
+      comment.anchor.status = "mismatch"
+    end
+    result[index] = comment
+  end
+  return result
+end
+
 local function comments_for(scope)
   render.sync_all()
   local _, _, root, relative = current_context()
   if not root then
     return nil, {}
   end
+  local comments
   if scope == "current" then
     local comment = render.at_cursor()
-    return root, comment and { comment } or {}
+    comments = comment and { comment } or {}
   elseif scope == "buffer" then
-    return root, store.list(root, relative)
+    comments = store.list(root, relative)
+  else
+    comments = store.list(root)
   end
-  return root, store.list(root)
+  return root, flag_replaced_closed_files(root, comments)
 end
 
 local function deliver(root, comments, mode)

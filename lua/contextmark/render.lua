@@ -22,16 +22,85 @@ local function file_verdict(bufnr, root, relative, lines)
   local tick = vim.b[bufnr].changedtick
   local cached = verdicts[bufnr]
   if cached and cached.tick == tick and cached.relative == relative and cached.stored == stored then
-    return cached.verdict, cached.fingerprint
+    return cached.verdict, cached.fingerprint, cached.share
   end
-  local verdict, fingerprint = identity.compare(stored, lines)
+  local verdict, fingerprint, share = identity.compare(stored, lines)
   verdicts[bufnr] = {
     tick = tick,
     relative = relative,
     stored = stored,
     verdict = verdict,
     fingerprint = fingerprint,
+    share = share,
   }
+  return verdict, fingerprint, share
+end
+
+-- Does any note still find its own surroundings here? A document written from
+-- the same template as this one shares its boilerplate, so the file-wide check
+-- can call it the same file; what it cannot share is the text each note was
+-- written next to.
+--
+-- "Surroundings" means the lines right beside where the note resolves now, not
+-- a context line found anywhere in the file: a sibling document can carry one
+-- of those lines somewhere else, and a note on boilerplate would then be cleared
+-- by boilerplate.
+--
+-- The note's own excerpt does not count. It is often the very boilerplate the
+-- two documents share -- a note on "## Decision" resolves in every ADR ever
+-- written from that template -- and whether the excerpt resolves is what
+-- anchor.resolve() already reports.
+--
+-- A note already flagged "mismatch" has no vote. Once a file is judged replaced,
+-- a note added to it is written against the replacement, and would vouch for it.
+local function notes_recognize(comments, lines)
+  for _, comment in ipairs(comments) do
+    local stored = comment.anchor
+    local start_line, end_line, status
+    if stored.status ~= "mismatch" then
+      start_line, end_line, status = anchor.resolve(lines, stored)
+    end
+    -- A "stale" position is only the old line number, and a sibling from the
+    -- same template has the same heading right above that line.
+    if start_line and (status == "exact" or status == "moved") then
+      local before = type(stored.before) == "table" and stored.before or {}
+      for index, line in ipairs(before) do
+        if identity.same_line(line, lines[start_line - #before - 1 + index]) then
+          return true
+        end
+      end
+      for index, line in ipairs(type(stored.after) == "table" and stored.after or {}) do
+        if identity.same_line(line, lines[end_line + index]) then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
+-- Whether the file in `lines` is still the one the notes at `relative` were
+-- written against: "same" / "replaced" / "unknown", plus the fingerprint to
+-- record if it is. The single place that decision is made -- render, sync and
+-- the prompt for closed files all go through it, so none of them can take a
+-- sibling document for the note's file while another path flags it.
+function M.judge(root, relative, lines, comments, bufnr)
+  local verdict, fingerprint, share
+  if bufnr then
+    verdict, fingerprint, share = file_verdict(bufnr, root, relative, lines)
+  else
+    verdict, fingerprint, share = identity.compare(store.fingerprint(root, relative), lines)
+  end
+  if
+    verdict == "same"
+    and share
+    and share <= identity.weak_share
+    and not notes_recognize(comments, lines)
+  then
+    -- Recognised only by boilerplate, and not one note found the text it was
+    -- written beside: a sibling document has taken this file's place.
+    verdict = "replaced"
+  end
   return verdict, fingerprint
 end
 
@@ -62,12 +131,6 @@ local function severity_of(status)
     return "mismatch"
   end
   return util.is_warning_status(status) and "stale" or "ok"
-end
-
--- What a note's status becomes once the file it points at is judged to be a
--- different file. An emptied file is not a different file, so it keeps its own.
-local function replaced_status(status)
-  return status == "orphaned" and status or "mismatch"
 end
 
 -- The extmark has collapsed onto nothing, because the noted text was deleted.
@@ -197,7 +260,7 @@ function M.render(bufnr)
     end
   end
   if #comments > 0 then
-    verdict, fingerprint = file_verdict(bufnr, root, relative, lines)
+    verdict, fingerprint = M.judge(root, relative, lines, comments, bufnr)
   end
   local replaced = verdict == "replaced"
 
@@ -221,7 +284,7 @@ function M.render(bufnr)
         -- line at the very same position -- but it is not this note's text.
         -- Place it where it was recorded, not on the replacement's match: sync
         -- and the hover both read the extmark.
-        status = replaced_status(status)
+        status = "mismatch"
         local count = math.max(#lines, 1)
         start_line = math.max(1, math.min(comment.anchor.start_line, count))
         end_line = math.max(start_line, math.min(comment.anchor.end_line or start_line, count))
@@ -334,7 +397,7 @@ function M.sync(bufnr)
   -- note that resolved as healthy in a replacement file is protected too.
   local frozen = false
   if #comments > 0 then
-    frozen = file_verdict(bufnr, root, relative, lines) == "replaced"
+    frozen = M.judge(root, relative, lines, comments, bufnr) == "replaced"
   end
 
   local line_count = math.max(#lines, 1)
@@ -371,7 +434,7 @@ function M.sync(bufnr)
           -- This is keyed on the file's identity, NOT on the note's status: a
           -- note that still resolves cleanly inside a replacement file needs the
           -- same protection.
-          stored.status = replaced_status(stored.status)
+          stored.status = "mismatch"
         elseif degenerate or util.is_warning_status(stored.status) then
           -- Either the extmark collapsed onto nothing (the noted text was
           -- deleted), or the note was already unresolved when it was placed, so

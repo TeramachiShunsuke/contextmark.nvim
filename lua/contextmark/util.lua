@@ -241,6 +241,12 @@ local function buffer_for(path)
   return nil
 end
 
+-- The loaded buffer holding exactly this file, if any. Unlike vim.fn.bufnr(),
+-- which matches names as patterns, "a.md" never finds "a.md.bak".
+function M.buffer_for(path)
+  return buffer_for(path)
+end
+
 function M.read_buffer_or_file(path)
   local bufnr = buffer_for(path)
   if bufnr then

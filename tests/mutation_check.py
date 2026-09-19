@@ -29,7 +29,7 @@ MUTATIONS = [
     (
         "sync verdict ignored",
         "lua/contextmark/render.lua",
-        'frozen = file_verdict(bufnr, root, relative, lines) == "replaced"',
+        'frozen = M.judge(root, relative, lines, comments, bufnr) == "replaced"',
         "frozen = false",
     ),
     (
@@ -61,12 +61,6 @@ MUTATIONS = [
         "lua/contextmark/render.lua",
         "if end_line > start_line and end_col == 0 and span and end_line - start_line > span then",
         "if false then",
-    ),
-    (
-        "orphaned exception off",
-        "lua/contextmark/render.lua",
-        'return status == "orphaned" and status or "mismatch"',
-        'return "mismatch"',
     ),
     (
         "sync clamp off",
@@ -295,6 +289,102 @@ MUTATIONS = [
         "  bases[root] = vim.deepcopy(state)\n  release_lock(lock)\n  vim.uv.fs_unlink(path .. \".lock\")\n",
     ),
     (
+        "wrap tolerance off",
+        "lua/contextmark/identity.lua",
+        "  if type(stored.paragraphs) == \"table\" and #stored.paragraphs >= paragraph_sample_floor then",
+        "  if false then",
+    ),
+    (
+        "closed files not judged for the prompt",
+        "lua/contextmark/init.lua",
+        "      verdicts[relative] = type(lines) == \"table\"\n        and render.judge(",
+        "      verdicts[relative] = false\n        and render.judge(",
+    ),
+    (
+        "notes not consulted on weak file evidence",
+        "lua/contextmark/render.lua",
+        "    and not notes_recognize(comments, lines)\n",
+        "    and false\n",
+    ),
+    (
+        "notes never recognize their surroundings",
+        "lua/contextmark/render.lua",
+        "local function notes_recognize(comments, lines)\n",
+        "local function notes_recognize(comments, lines)\n  do\n    return false\n  end\n",
+    ),
+    (
+        "blank-only file judged as replaced",
+        "lua/contextmark/identity.lua",
+        "  if #body == 0 then\n    return \"unknown\", current\n  end",
+        "",
+    ),
+    (
+        "blank-only file not treated as empty",
+        "lua/contextmark/anchor.lua",
+        "    if line:match(\"%S\") then\n      return false\n    end",
+        "    if line ~= \"\" then\n      return false\n    end",
+    ),
+    (
+        "paragraph rescue reports a full share",
+        "lua/contextmark/identity.lua",
+        "      return \"same\", current, paragraph_hits / #stored.paragraphs",
+        "      return \"same\", current, 1",
+    ),
+    (
+        "sync skips the note judgement",
+        "lua/contextmark/render.lua",
+        "    frozen = M.judge(root, relative, lines, comments, bufnr) == \"replaced\"",
+        "    frozen = file_verdict(bufnr, root, relative, lines) == \"replaced\"",
+    ),
+    (
+        "closed-file lookup by bufnr() pattern",
+        "lua/contextmark/init.lua",
+        "      local open = util.buffer_for(path) ~= nil",
+        "      local open = vim.fn.bufnr(path) >= 0",
+    ),
+    (
+        "closed files judged without the notes",
+        "lua/contextmark/render.lua",
+        "    verdict, fingerprint, share = identity.compare(store.fingerprint(root, relative), lines)\n  end",
+        "    return identity.compare(store.fingerprint(root, relative), lines)\n  end",
+    ),
+    (
+        "exactly half the sample trusted",
+        "lua/contextmark/render.lua",
+        "    and share <= identity.weak_share",
+        "    and share < identity.weak_share",
+    ),
+    (
+        "relocation follows a weak match",
+        "lua/contextmark/init.lua",
+        "if verdict == \"same\" and share and share > identity.weak_share then",
+        "if verdict == \"same\" then",
+    ),
+    (
+        "flagged notes vote for the file",
+        "lua/contextmark/render.lua",
+        "    if stored.status ~= \"mismatch\" then\n      start_line, end_line, status = anchor.resolve(lines, stored)",
+        "    if true then\n      start_line, end_line, status = anchor.resolve(lines, stored)",
+    ),
+    (
+        "a stale fallback position vouches for the file",
+        "lua/contextmark/render.lua",
+        "    if start_line and (status == \"exact\" or status == \"moved\") then",
+        "    if start_line then",
+    ),
+    (
+        "rename trusts the file alone",
+        "lua/contextmark/init.lua",
+        "  if render.judge(root, before.file, lines, store.list(root, before.file)) == \"replaced\" then",
+        "  if identity.compare(store.fingerprint(root, before.file), lines) == \"replaced\" then",
+    ),
+    (
+        "note added to a replaced file born healthy",
+        "lua/contextmark/init.lua",
+        "    captured.status = \"mismatch\"\n",
+        "",
+    ),
+    (
         "deletion tombstones off",
         "lua/contextmark/store.lua",
         "  local tombstones = removed[root]\n  if not tombstones then",
@@ -340,8 +430,8 @@ MUTATIONS = [
     (
         "relocate accepts any file",
         "lua/contextmark/init.lua",
-        '              and identity.compare(entry.stored, lines) == "same"',
-        "              and true",
+        '              local verdict, _, share = identity.compare(entry.stored, lines)',
+        '              local verdict, _, share = "same", nil, 1',
     ),
     (
         "move destination not mapped into the root",
