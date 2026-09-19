@@ -345,186 +345,65 @@ end
 
 local lock_attempts = 40
 local lock_wait_ms = 10
-local lock_stale_seconds = 5
-local lock_owner_prefix = "pid:"
 
 -- The whole read-modify-write has to be exclusive. The atomic rename only
 -- guarantees that no reader sees a half-written file; it does not stop two
 -- instances from each reading, merging and writing, with the later rename
 -- discarding the earlier one's notes.
-local function process_start_token(pid)
-  local file = io.open(("/proc/%d/stat"):format(pid), "r")
-  if not file then
-    return nil
-  end
-  local stat = file:read("*l")
-  file:close()
-  local tail = stat and stat:match("^%d+ %b() (.+)$")
-  if not tail then
-    return nil
-  end
-  local index = 0
-  for field in tail:gmatch("%S+") do
-    index = index + 1
-    if index == 20 then
-      return field
-    end
-  end
-  return nil
-end
-
-local function lock_owner_line()
-  local pid = vim.fn.getpid()
-  local start = process_start_token(pid)
-  if start then
-    return ("%s%d:%s\n"):format(lock_owner_prefix, pid, start)
-  end
-  return ("%s%d\n"):format(lock_owner_prefix, pid)
-end
-
-local function parse_lock_owner(line)
-  local pid, start = line:match("^" .. lock_owner_prefix .. "(%d+):(%d+)$")
-  if pid then
-    return { pid = tonumber(pid), start = start }
-  end
-  pid = line:match("^" .. lock_owner_prefix .. "(%d+)$")
-  if pid then
-    return { pid = tonumber(pid) }
-  end
-  return nil
-end
-
-local function read_lock_owner(path)
-  local file = io.open(path, "r")
-  if not file then
-    if vim.uv.fs_stat(path) == nil then
-      return nil, true
-    end
-    file = io.open(path, "r")
-    if not file then
-      return nil, vim.uv.fs_stat(path) == nil
-    end
-  end
-  local first, read_error = file:read("*l")
-  local closed, close_error = file:close()
-  if read_error or not closed then
-    return nil, false
-  end
-  return first and parse_lock_owner(first) or nil, true
-end
-
-local function owner_is_alive(path)
-  local owner, readable = read_lock_owner(path)
-  if readable == false then
-    return true
-  end
-  if not (owner and owner.pid and owner.pid > 0 and vim.uv.kill) then
-    return false
-  end
-  if owner.start then
-    local start = process_start_token(owner.pid)
-    if start and start ~= owner.start then
-      return false
-    end
-  end
-  local function is_missing_process(...)
-    for index = 1, select("#", ...) do
-      if tostring(select(index, ...)):match("ESRCH") then
-        return true
-      end
-    end
-    return false
-  end
-  local ok, result, error_message, error_name = pcall(vim.uv.kill, owner.pid, 0)
-  if ok then
-    if result ~= nil then
-      return true
-    end
-    return not is_missing_process(error_message, error_name)
-  end
-  return not is_missing_process(result, error_message, error_name)
-end
-
-local function is_stale(info, path)
-  return info ~= nil
-    and os.time() - info.mtime.sec > lock_stale_seconds
-    and not (path and owner_is_alive(path))
-end
-
--- Removes the lock at `lock` only if it is still the stale one we looked at.
 --
--- Checking and removing must not be separable. Between a waiter's stat and its
--- unlink, another waiter can clear the same stale lock and take a fresh one,
--- and an unlink by name then removes that live lock; moving the lock aside to
--- inspect it instead leaves the path empty for a moment, and a third waiter
--- takes it while the second still believes it holds the lock. Clearing is
--- therefore serialized on a second lock: while a waiter holds it, the stale
--- lock cannot be cleared or replaced by anyone else, so its re-check and
--- unlink see the same file.
-local function clear_stale_lock(lock, seen)
-  local breaker = lock .. ".break"
-  local handle = vim.uv.fs_open(breaker, "wx", 384)
-  if not handle then
-    -- Another waiter is clearing it. A breaker is held for microseconds, so a
-    -- stale one was left by an instance that died mid-clear.
-    local seen_breaker = vim.uv.fs_stat(breaker)
-    if seen_breaker and is_stale(seen_breaker, breaker) then
-      local current_breaker = vim.uv.fs_stat(breaker)
-      if current_breaker
-        and current_breaker.ino == seen_breaker.ino
-        and current_breaker.mtime.sec == seen_breaker.mtime.sec
-        and current_breaker.mtime.nsec == seen_breaker.mtime.nsec
-        and is_stale(current_breaker, breaker)
-      then
-        vim.uv.fs_unlink(breaker)
-      end
-    end
-    return false
-  end
-  local owner = lock_owner_line()
-  local written, write_error = vim.uv.fs_write(handle, owner, -1)
-  local close_ok, close_result = pcall(vim.uv.fs_close, handle)
-  if written ~= #owner or not close_ok or close_result == false then
-    vim.uv.fs_unlink(breaker)
-    return false
-  end
-  local current = vim.uv.fs_stat(lock)
-  -- The inode alone is not enough: Linux reuses a freed inode number at once,
-  -- so a fresh lock can carry the stale one's number. A fresh lock is also not
-  -- stale.
-  local cleared = current ~= nil
-    and current.ino == seen.ino
-    and current.mtime.sec == seen.mtime.sec
-    and current.mtime.nsec == seen.mtime.nsec
-    and is_stale(current, lock)
-  if cleared then
-    vim.uv.fs_unlink(lock)
-  end
-  vim.uv.fs_unlink(breaker)
-  return cleared
-end
+-- The lock is the kernel's flock() on <sidecar>.lock, not the file's existence.
+-- A lock made of "the file exists" has to be cleared by name when its owner
+-- dies, and every way of checking-then-removing it by name leaves a window in
+-- which another instance's live lock is removed: a second lock to serialize the
+-- clearing only moves the same window onto that second lock. flock() is held
+-- by the open file and released by the kernel when the process exits or
+-- crashes, so there is nothing stale to judge and nothing to remove. The file
+-- itself is never unlinked: unlinking a flock()ed file lets one instance lock
+-- the old inode while another creates and locks a new one.
+local has_ffi, ffi = pcall(require, "ffi")
+local LOCK_EX, LOCK_NB, LOCK_UN = 2, 4, 8
+local flock_available = has_ffi
+  and pcall(ffi.cdef, "int flock(int fd, int operation);")
+  and pcall(function()
+    return ffi.C.flock
+  end)
 
 local function acquire_lock(path)
-  local lock = path .. ".lock"
-  for _ = 1, lock_attempts do
-    local handle = vim.uv.fs_open(lock, "wx", 384)
-    if handle then
-      local owner = lock_owner_line()
-      local written, write_error = vim.uv.fs_write(handle, owner, -1)
-      local close_ok, close_result = pcall(vim.uv.fs_close, handle)
-      if written == #owner and close_ok and close_result ~= false then
-        return lock
-      end
-      vim.uv.fs_unlink(lock)
-      return nil, write_error or (not close_ok and close_result) or "could not initialize the sidecar lock"
-    end
-    local info = vim.uv.fs_stat(lock)
-    -- Left behind by an instance that died before releasing it.
-    if not (is_stale(info, lock) and clear_stale_lock(lock, info)) then
-      vim.uv.sleep(lock_wait_ms)
-    end
+  if not flock_available then
+    -- No flock() (Windows, or a Neovim built without LuaJIT): save without
+    -- cross-instance locking, as before locking existed, rather than refuse
+    -- every save.
+    return true
   end
+  local fd, open_error = vim.uv.fs_open(path .. ".lock", "a", 384)
+  if not fd then
+    return nil, "could not open the sidecar lock: " .. tostring(open_error)
+  end
+  for _ = 1, lock_attempts do
+    if ffi.C.flock(fd, LOCK_EX + LOCK_NB) == 0 then
+      return fd
+    end
+    vim.uv.sleep(lock_wait_ms)
+  end
+  vim.uv.fs_close(fd)
   return nil
+end
+
+local function release_lock(lock)
+  if type(lock) == "number" then
+    ffi.C.flock(lock, LOCK_UN)
+    vim.uv.fs_close(lock)
+  end
+end
+
+-- Holds the sidecar lock of `root` the way another Neovim instance would, and
+-- returns a function that releases it. For tests of the contention paths.
+function M.hold_lock(root)
+  local lock = acquire_lock(state_path(root))
+  assert(lock, "could not take the sidecar lock")
+  return function()
+    release_lock(lock)
+  end
 end
 
 local function write_state(state, path)
@@ -587,21 +466,21 @@ function M.save(root)
     elseif reason ~= "absent" then
       unreadable[root] = reason
       stamps[root] = stamp
-      vim.uv.fs_unlink(lock)
+      release_lock(lock)
       return refuse()
     end
   end
 
   local ok, error_message = write_state(state, path)
   if not ok then
-    vim.uv.fs_unlink(lock)
+    release_lock(lock)
     return false, error_message
   end
   -- Stat before releasing the lock, so a writer waiting on it cannot slip a
   -- change in that we would then record as already read.
   stamps[root] = stamp_of(path)
   bases[root] = vim.deepcopy(state)
-  vim.uv.fs_unlink(lock)
+  release_lock(lock)
 
   if retiring[root] then
     -- Keep the old files for recovery, but out of the *.json scan.

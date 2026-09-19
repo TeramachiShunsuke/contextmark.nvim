@@ -1703,22 +1703,33 @@ end)
 test("refuses to save while another instance holds the lock", function()
   local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
   add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
 
-  local handle = assert(vim.uv.fs_open(lock, "wx", 384), "could not take the lock")
-  vim.uv.fs_close(handle)
+  local release = store.hold_lock(root)
   store.set_fingerprint(root, "docs/a.md", { digest = "local-only", sample = {} })
   local blocked, reason = store.save(root)
-
-  -- A lock left behind by a crashed instance must not block writes forever.
-  local stale = os.time() - 600
-  vim.uv.fs_utime(lock, stale, stale)
-  local reclaimed = store.save(root)
-  vim.uv.fs_unlink(lock)
+  release()
+  local after_release = store.save(root)
 
   equal(blocked, false)
   assert(reason and reason:find("locked", 1, true), "the reason did not mention the lock")
-  equal(reclaimed, true)
+  equal(after_release, true)
+end)
+
+test("a lock file left by a crashed instance does not block saves", function()
+  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
+  add_note(root, "docs/a.md", marked_at, marked_at)
+  -- What a crash leaves: the lock file, with nobody holding flock() on it. The
+  -- previous file-existence lock had to judge this "stale" and clear it by name,
+  -- which could remove another instance's live lock.
+  local lock = store.path(root) .. ".lock"
+  vim.fn.writefile({ "pid:999999" }, lock)
+
+  local saved = store.save(root)
+  local still_there = vim.uv.fs_stat(lock) ~= nil
+
+  equal(saved, true)
+  -- Never unlinked: removing a flock()ed file lets two instances lock two inodes.
+  equal(still_there, true)
 end)
 
 test("does not match an unrelated file through a repeated line", function()
@@ -2215,10 +2226,9 @@ test("keeps another instance's edits and deletions after a failed save", functio
 
   -- A save that fails (here: the sidecar is locked) used to pin the cache, so
   -- this instance never saw later changes and its next save wrote them away.
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({}, lock)
+  local release = store.hold_lock(root)
   local locked = store.add(root, plain_note("cm-a1"))
-  vim.uv.fs_unlink(lock)
+  release()
   equal(locked, false)
 
   with_other_instance(function(other)
@@ -2245,10 +2255,9 @@ end)
 test("refuses to overwrite a sidecar that became unreadable after a failed save", function()
   local root, store = fixture({ ["note.md"] = { "hello" } })
   equal(store.add(root, plain_note("cm-x")), true)
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({}, lock)
+  local release = store.hold_lock(root)
   equal(store.add(root, plain_note("cm-a1")), false)
-  vim.uv.fs_unlink(lock)
+  release()
 
   -- A newer contextmark rewrote the sidecar in the meantime.
   local newer = vim.json.encode({ version = 2, root = root, notes = { { id = "v2" } } })
@@ -2278,10 +2287,9 @@ test("does not bring back a deleted legacy note when the migration save failed",
   vim.fn.writefile({ encoded }, store.path(legacy_root))
 
   -- The save attempted during migration fails, so the legacy file stays.
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({}, lock)
+  local release = store.hold_lock(root)
   equal(#store.list(root), 1)
-  vim.uv.fs_unlink(lock)
+  release()
   equal(vim.uv.fs_stat(store.path(legacy_root)) ~= nil, true)
 
   -- The first save that does succeed must retire it, or the next session merges
@@ -2669,271 +2677,6 @@ test("an edit saved late does not undo a move made meanwhile", function()
   equal(#on_b, 1)
   equal(on_b[1].body, "after")
   equal(on_b[1].updated_at, "later")
-end)
-
-test("does not remove a fresh lock taken while a stale one was being cleared", function()
-  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
-  add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({}, lock)
-  local stale = os.time() - 60
-  vim.uv.fs_utime(lock, stale, stale)
-
-  -- Two instances find the same stale lock. The other one clears it and takes
-  -- a fresh lock between our stat and our unlink, which used to remove the
-  -- other instance's lock and let both of them write.
-  local original_stat = vim.uv.fs_stat
-  local theirs, stale_ino
-  vim.uv.fs_stat = function(path, ...)
-    local info = original_stat(path, ...)
-    if path == lock and not theirs then
-      stale_ino = info.ino
-      vim.uv.fs_unlink(lock)
-      local handle = assert(vim.uv.fs_open(lock, "wx", 384))
-      vim.uv.fs_close(handle)
-      theirs = original_stat(lock).ino
-    elseif info and theirs and path == lock then
-      -- Linux hands the freed inode number straight to the next file, so the
-      -- fresh lock can look like the stale one by inode alone. Reproduce that
-      -- on every platform.
-      info = vim.deepcopy(info)
-      info.ino = stale_ino
-    end
-    return info
-  end
-  local ok, saved = pcall(store.save, root)
-  vim.uv.fs_stat = original_stat
-  local survivor = vim.uv.fs_stat(lock)
-  vim.uv.fs_unlink(lock)
-  if not ok then
-    error(saved, 0)
-  end
-
-  equal(saved, false)
-  assert(survivor, "the other instance's lock was removed")
-  equal(survivor.ino, theirs)
-end)
-
-test("leaves a stale lock alone while another waiter is clearing it", function()
-  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
-  add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({}, lock)
-  local stale = os.time() - 60
-  vim.uv.fs_utime(lock, stale, stale)
-  local stale_ino = vim.uv.fs_stat(lock).ino
-  -- Another waiter is in the middle of clearing it.
-  vim.fn.writefile({}, lock .. ".break")
-
-  local saved = store.save(root)
-  local survivor = vim.uv.fs_stat(lock)
-  vim.uv.fs_unlink(lock)
-  vim.uv.fs_unlink(lock .. ".break")
-
-  -- Clearing it too would race that waiter: whichever of us unlinks second can
-  -- remove the fresh lock the other has just taken.
-  equal(saved, false)
-  assert(survivor, "the stale lock was cleared while another waiter held the breaker")
-  equal(survivor.ino, stale_ino)
-end)
-
-test("does not clear a stale-looking breaker whose owner is still alive", function()
-  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
-  add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
-  local breaker = lock .. ".break"
-  vim.fn.writefile({}, lock)
-  vim.fn.writefile({ "pid:" .. tostring(vim.fn.getpid()) }, breaker)
-  local stale = os.time() - 60
-  vim.uv.fs_utime(lock, stale, stale)
-  vim.uv.fs_utime(breaker, stale, stale)
-
-  local saved = store.save(root)
-  local lock_survivor = vim.uv.fs_stat(lock)
-  local breaker_survivor = vim.uv.fs_stat(breaker)
-  vim.uv.fs_unlink(lock)
-  vim.uv.fs_unlink(breaker)
-
-  equal(saved, false)
-  assert(lock_survivor, "the stale lock was cleared while another waiter was alive")
-  assert(breaker_survivor, "the active break lock was removed by mtime alone")
-end)
-
-test("clears a breaker left by a waiter that died while clearing", function()
-  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
-  add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
-  local stale = os.time() - 60
-  for _, path in ipairs({ lock, lock .. ".break" }) do
-    vim.fn.writefile({}, path)
-    vim.uv.fs_utime(path, stale, stale)
-  end
-
-  local saved = store.save(root)
-  local leftovers = (vim.uv.fs_stat(lock) and 1 or 0)
-    + (vim.uv.fs_stat(lock .. ".break") and 1 or 0)
-
-  -- Otherwise one crash would block every save to this project for good.
-  equal(saved, true)
-  equal(leftovers, 0)
-end)
-
-test("does not remove a fresh breaker acquired after a stale breaker check", function()
-  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
-  add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
-  local breaker = lock .. ".break"
-  vim.fn.writefile({}, lock)
-  vim.fn.writefile({ "pid:0" }, breaker)
-  local stale = os.time() - 60
-  vim.uv.fs_utime(lock, stale, stale)
-  vim.uv.fs_utime(breaker, stale, stale)
-
-  local original_open = vim.uv.fs_open
-  local original_stat = vim.uv.fs_stat
-  local original_unlink = vim.uv.fs_unlink
-  local swapped = false
-  local breaker_stats = 0
-  local ok, saved = xpcall(function()
-    vim.uv.fs_open = function(path, flags, mode)
-      if path == breaker and flags == "wx" then
-        return nil
-      end
-      return original_open(path, flags, mode)
-    end
-    vim.uv.fs_stat = function(path, ...)
-      local info = original_stat(path, ...)
-      if path == breaker then
-        breaker_stats = breaker_stats + 1
-        if breaker_stats == 2 then
-          original_unlink(breaker)
-          local handle = assert(original_open(breaker, "wx", 384))
-          local owner = "pid:" .. tostring(vim.fn.getpid()) .. "\n"
-          assert(vim.uv.fs_write(handle, owner, -1) == #owner)
-          assert(vim.uv.fs_close(handle))
-          info = original_stat(path, ...)
-        end
-      end
-      return info
-    end
-    vim.uv.fs_unlink = function(path, ...)
-      if path == breaker and not swapped then
-        swapped = true
-        original_unlink(breaker)
-        local handle = assert(original_open(breaker, "wx", 384))
-        local owner = "pid:" .. tostring(vim.fn.getpid()) .. "\n"
-        assert(vim.uv.fs_write(handle, owner, -1) == #owner)
-        assert(vim.uv.fs_close(handle))
-      end
-      return original_unlink(path, ...)
-    end
-    return store.save(root)
-  end, function(error_message)
-    return error_message
-  end)
-  vim.uv.fs_open = original_open
-  vim.uv.fs_stat = original_stat
-  vim.uv.fs_unlink = original_unlink
-  if not ok then
-    error(saved, 0)
-  end
-  local breaker_survivor = vim.uv.fs_stat(breaker)
-  vim.uv.fs_unlink(lock)
-  vim.uv.fs_unlink(breaker)
-
-  equal(saved, false)
-  equal(swapped, false)
-  assert(breaker_survivor, "the fresh breaker was removed by an outdated stale check")
-end)
-
-test("does not clear a stale-looking lock whose owner is still alive", function()
-  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
-  add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({ "pid:" .. tostring(vim.fn.getpid()) }, lock)
-  local stale = os.time() - 60
-  vim.uv.fs_utime(lock, stale, stale)
-
-  local saved = store.save(root)
-  local survivor = vim.uv.fs_stat(lock)
-  vim.uv.fs_unlink(lock)
-
-  -- A valid save can outlive the stale timeout. Clearing its lock anyway lets a
-  -- second writer run concurrently and lose one side's updates.
-  equal(saved, false)
-  assert(survivor, "the live writer's lock was cleared by mtime alone")
-end)
-
-test("does not clear a stale-looking lock when owner liveness returns EPERM", function()
-  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
-  add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({ "pid:" .. tostring(vim.fn.getpid()) }, lock)
-  local stale = os.time() - 60
-  vim.uv.fs_utime(lock, stale, stale)
-
-  local original_kill = vim.uv.kill
-  local ok, saved = xpcall(function()
-    vim.uv.kill = function()
-      error("EPERM", 0)
-    end
-    return store.save(root)
-  end, function(error_message)
-    return error_message
-  end)
-  vim.uv.kill = original_kill
-  local survivor = vim.uv.fs_stat(lock)
-  vim.uv.fs_unlink(lock)
-  if not ok then
-    error(saved, 0)
-  end
-
-  equal(saved, false)
-  assert(survivor, "the live writer's lock was cleared after EPERM")
-end)
-
-test("clears a stale lock when only the PID was reused", function()
-  local probe = io.open("/proc/self/stat", "r")
-  if not probe then
-    return
-  end
-  probe:close()
-  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
-  add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
-  vim.fn.writefile({ "pid:" .. tostring(vim.fn.getpid()) .. ":0" }, lock)
-  local stale = os.time() - 60
-  vim.uv.fs_utime(lock, stale, stale)
-
-  local saved = store.save(root)
-  local survivor = vim.uv.fs_stat(lock)
-
-  equal(saved, true)
-  equal(survivor, nil)
-end)
-
-test("fails lock acquisition when owner write is short", function()
-  local root, store = fixture({ ["docs/a.md"] = document("Alpha") })
-  add_note(root, "docs/a.md", marked_at, marked_at)
-  local lock = store.path(root) .. ".lock"
-
-  local original_write = vim.uv.fs_write
-  local ok, saved = xpcall(function()
-    vim.uv.fs_write = function(_, text)
-      return math.max(#text - 1, 0)
-    end
-    return store.save(root)
-  end, function(error_message)
-    return error_message
-  end)
-  vim.uv.fs_write = original_write
-  if not ok then
-    error(saved, 0)
-  end
-  local survivor = vim.uv.fs_stat(lock)
-
-  equal(saved, false)
-  equal(survivor, nil)
 end)
 
 test("expands only a leading ~ in :ContextMarkMove paths", function()
