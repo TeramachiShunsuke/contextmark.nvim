@@ -138,4 +138,5 @@ floatへ表示する。stale範囲は警告色で示し、取り消し線は使�
 
 ## Related eval
 
-Orca 機能ギャップ（Rich previews / Linear）の評価メモ: [eval/orca-gaps.md](eval/orca-gaps.md)
+- 全体の落とし込み: [eval/target-shape.md](eval/target-shape.md)
+- Rich previews / Linear の試用メモ: [eval/orca-gaps.md](eval/orca-gaps.md)

@@ -3,6 +3,8 @@
 調査・草案日: 2026-10-01  
 前提: LazyVim。モバイルは対象外。作成判断は「既存を組んで足りるか」が先。
 
+**全体の落とし込み図**は [target-shape.md](target-shape.md)（何を作り・組み・外に置くか）。
+
 ## 進め方（このドキュメントの使い方）
 
 1. LazyVim に [contrib/lazyvim-eval](../../contrib/lazyvim-eval/) のスニペットを入れる
