@@ -1,16 +1,26 @@
--- Parallel agent worktrees inside Neovim (Orca-like race), Linear-unaware.
--- Needs: git + at least one of claude|codex|gemini|opencode on PATH.
+-- Phase 1: hangar for parallel worktree agents (Linear-unaware).
+-- Needs at least one of: claude | codex | gemini | opencode on PATH.
 return {
   {
     "yal212/hangar.nvim",
     cmd = "Hangar",
     keys = {
       { "<leader>oh", "<cmd>Hangar<cr>", desc = "Hangar dashboard" },
+      {
+        "<leader>os",
+        function()
+          vim.ui.input({ prompt = "Hangar spawn (safe): " }, function(prompt)
+            if not prompt or prompt == "" then
+              return
+            end
+            vim.cmd("Hangar spawn --safe " .. prompt)
+          end)
+        end,
+        desc = "Hangar spawn --safe",
+      },
     },
     opts = {
-      -- During eval, prefer being explicit per spawn:
-      --   :Hangar spawn --safe fix flaky auth
-      --   :Hangar spawn --n 2 --safe same prompt race
+      -- Prefer explicit --safe / --yolo per spawn during the trial week.
       default_permission = nil,
       adapter = "claude_code",
     },

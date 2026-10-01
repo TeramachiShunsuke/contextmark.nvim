@@ -187,13 +187,14 @@ LazyVim のまま、**中央の Note と右の agent** が本線。
 ## 7. 段階ロードマップ（作成判断付き）
 
 ```text
-Phase 0  今ここ
+Phase 0  完了（Cloud デモで操作感確認済み）
   contextmark を本線として使う
   lang.markdown + snacks.image を有効化して読む体験を揃える
 
-Phase 1  組む（コードほぼ無し）
+Phase 1  今ここ — 組む（コードほぼ無し）
+  詳細: [phase1-runbook.md](phase1-runbook.md)
   octo / sidekick を常用
-  hangar か workmux を1つ選んで並列を1週間試す
+  並列は hangar に一本化して1週間試す（workmux は使わない）
   Linear はブラウザのまま手数を数える
 
 Phase 2  測ってからだけ作る

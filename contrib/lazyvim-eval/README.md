@@ -11,10 +11,11 @@ LazyVim の `~/.config/nvim/lua/plugins/` に、使いたいファイルだけ�
 
 | ファイル | 目的 |
 | --- | --- |
-| `markdown-extra.lua` | `lang.markdown` を extras から有効化（または手動相当） |
+| `phase1-extras.lua` | Phase 1 extras（markdown / snacks_picker / octo / sidekick） |
+| `markdown-extra.lua` | `lang.markdown` のみ（単体用） |
 | `snacks-image.lua` | インライン画像 / PDF |
-| `linear.lua` | Linear issue 閲覧（要 API key） |
-| `hangar.lua` | 並列 worktree agent（Linear 非連携） |
+| `hangar.lua` | 並列 worktree agent（Phase 1 本線） |
+| `linear.lua` | Linear 閲覧（**Phase 2 検討用。Phase 1 では使わない**） |
 
 ## 最小手順
 
