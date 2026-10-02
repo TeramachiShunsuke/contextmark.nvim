@@ -247,15 +247,63 @@ glue が欲しい?: yes/no
 
 ---
 
-## 7. よくある詰まり
+## よくある詰まり
 
 | 症状 | 対処 |
 | --- | --- |
-| 画像が出ない | Kitty/Ghostty/WezTerm から起動しているか。`magick` があるか。`:checkhealth snacks` |
-| Sidekick に claude が無い | `which claude`。nvim 再起動。PATH が GUI 起動で消えていないか（ターミナルから `nvim`） |
+| **`<Space>a a` が無い** | Sidekick が入っていない。下の「キーが無いとき」を実施 |
+| **`<Space>m p b` が無い** | Markdown バッファ以外では効かない。contextmark 未ロードも疑う |
+| **`:Hangar` / `:Octo` が unknown** | プラグイン未インストール。`phase1-stack.lua` を入れて `:Lazy sync` |
+| 画像が出ない | Kitty/Ghostty/WezTerm から起動。`magick` と `:checkhealth snacks` |
+| Sidekick に claude が無い | `which claude`。nvim をターミナルから起動（PATH） |
 | Hangar spawn 失敗 | `claude auth status`。`:checkhealth hangar` |
-| Octo が Projects で怒る | `octo-tune.lua`（`default_to_projects_v2 = false`）を入れたままにする |
-| contextmark のキーが効かない | filetype が markdown か。`<Space>m` で which-key を見る |
+| Octo Projects エラー | `octo-tune.lua` または `phase1-stack.lua`（projects v2 off） |
+
+### キーが無いとき（いちばん多い）
+
+`:LazyExtras` だけだとうまく入らないことがある。**明示ファイルで入れる:**
+
+```bash
+REPO=~/projects/contextmark.nvim
+mkdir -p ~/.config/nvim/lua/plugins
+
+# Sidekick / Octo / Hangar / snacks.image を一括
+cp "$REPO/contrib/lazyvim-eval/phase1-stack.lua" ~/.config/nvim/lua/plugins/
+
+# contextmark
+cp "$REPO/contrib/lazyvim-eval/contextmark.lua" ~/.config/nvim/lua/plugins/
+# dir パスが違う場合は contextmark.lua を編集
+```
+
+nvim で:
+
+```vim
+:Lazy sync
+:Lazy
+" sidekick.nvim / octo.nvim / hangar.nvim / contextmark.nvim があるか見る
+```
+
+確認コマンド:
+
+```vim
+:lua =require("lazy.core.config").plugins["sidekick.nvim"] ~= nil
+:lua =require("lazy.core.config").plugins["octo.nvim"] ~= nil
+:lua =require("lazy.core.config").plugins["hangar.nvim"] ~= nil
+:lua =require("lazy.core.config").plugins["contextmark.nvim"] ~= nil
+```
+
+すべて `true` になったら:
+
+| 操作 | キー / コマンド | 注意 |
+| --- | --- | --- |
+| Sidekick | `<Space>a a` | which-key で `+ai` が出るはず |
+| CLI 選択 | `<Space>a s` | installed のみ |
+| Note 送信（buffer） | `<Space>m p b` | **markdown ファイルを開いた状態で** |
+| または | `:ContextMarkSend buffer` | filetype 不問の確認用 |
+| Octo PR | `<Space>g p` または `:Octo pr list` | `gh auth status` が OK なこと |
+| Hangar | `<Space>o h` または `:Hangar` | spawn は小さな git リポで |
+
+`which-key` で `<Space>` のあと `a` / `m` / `o` / `g` グループが見えなければ、まだロード失敗です。`:messages` と `:Lazy` のエラーを確認してください。
 
 ---
 
