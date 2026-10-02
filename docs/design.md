@@ -140,4 +140,6 @@ floatへ表示する。stale範囲は警告色で示し、取り消し線は使�
 
 - 全体の落とし込み: [eval/target-shape.md](eval/target-shape.md)
 - Phase 1 試用ランブック: [eval/phase1-runbook.md](eval/phase1-runbook.md)
+- **MacBook 手順**: [eval/macbook-setup.md](eval/macbook-setup.md)
 - Rich previews / Linear の試用メモ: [eval/orca-gaps.md](eval/orca-gaps.md)
+- Cloud デモ機: [eval/cloud-desktop-ready.md](eval/cloud-desktop-ready.md)
