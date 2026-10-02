@@ -11,11 +11,15 @@ LazyVim の `~/.config/nvim/lua/plugins/` に、使いたいファイルだけ�
 
 | ファイル | 目的 |
 | --- | --- |
-| `phase1-extras.lua` | Phase 1 extras（markdown / snacks_picker / octo / sidekick） |
-| `markdown-extra.lua` | `lang.markdown` のみ（単体用） |
-| `snacks-image.lua` | インライン画像 / PDF |
-| `hangar.lua` | 並列 worktree agent（Phase 1 本線） |
-| `linear.lua` | Linear 閲覧（**Phase 2 検討用。Phase 1 では使わない**） |
+| **`phase1-stack.lua`** | **推奨:** Sidekick / Octo / Hangar / snacks.image を一括（LazyExtras 不要） |
+| **`contextmark.lua`** | contextmark（`~/projects/contextmark.nvim` 前提） |
+| `phase1-extras.lua` | LazyExtras 用 import（任意） |
+| `markdown-extra.lua` | `lang.markdown` のみ |
+| `snacks-image.lua` | 画像のみ（stack に含まれる） |
+| `hangar.lua` | hangar のみ（stack に含まれる） |
+| `octo-tune.lua` | octo projects 抑制のみ |
+| `linear.lua` | Phase 1 では使わない |
+
 
 ## 最小手順
 
